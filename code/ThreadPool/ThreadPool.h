@@ -1,11 +1,15 @@
 #pragma once
 
+#include "BoundedRingQueue.h"
+#include "LocalTaskQueue.h"
+#include "MoveOnlyFunction.h"
+
 #include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
-#include <queue>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -30,7 +34,7 @@ enum class RejectPolicy
 class ThreadPool
 {
 public:
-    using Task = std::function<void()>;
+    using Task = MoveOnlyFunction<void()>;
 
     ThreadPool(std::size_t worker_count,
                std::size_t queue_capacity,
@@ -53,9 +57,18 @@ public:
 
 private:
     void post(Task task);
+    void WorkerLoop(std::size_t worker_index);
+    bool TrySteal(std::size_t worker_index, Task& task);
+    bool HasStealableWork(std::size_t worker_index) const;
+    bool AllLocalEmpty() const;
+    bool HasAnyWork(std::size_t worker_index) const;
+    void NotifyWorkers();
+
+    static thread_local LocalTaskQueue* tls_local;
 
     std::vector<std::thread> workers;
-    std::queue<Task> tasks;
+    std::vector<std::unique_ptr<LocalTaskQueue>> local_queues;
+    BoundedRingQueue<Task> tasks;
     std::size_t queue_capacity;
     RejectPolicy reject_policy;
     std::mutex mutex;
@@ -70,21 +83,28 @@ auto ThreadPool::submit(F&& f, Args&&... args)
 {
     using return_type = std::invoke_result_t<F, Args...>;
 
-    auto task = std::make_shared<std::packaged_task<return_type()>>(
+    std::packaged_task<return_type()> packaged(
         std::bind(std::forward<F>(f), std::forward<Args>(args)...));
 
-    std::future<return_type> result = task->get_future();
-    post([task]() { (*task)(); });
+    std::future<return_type> result = packaged.get_future();
+    post([packaged = std::move(packaged)]() mutable { packaged(); });
     return result;
 }
 
 template <class Rep, class Period>
 SubmitResult ThreadPool::post_for(Task task, const std::chrono::duration<Rep, Period>& timeout)
 {
+    if (tls_local != nullptr)
+    {
+        tls_local->PushOwner(std::move(task));
+        NotifyWorkers();
+        return SubmitResult::accepted;
+    }
+
     {
         std::unique_lock<std::mutex> lock(mutex);
         const bool ready = not_full.wait_for(lock, timeout, [this]() {
-            return stopping || tasks.size() < queue_capacity;
+            return stopping || !tasks.full();
         });
         if (stopping)
         {
@@ -94,8 +114,8 @@ SubmitResult ThreadPool::post_for(Task task, const std::chrono::duration<Rep, Pe
         {
             return SubmitResult::timeout;
         }
-        tasks.emplace(std::move(task));
+        tasks.push(std::move(task));
     }
-    not_empty.notify_one();
+    NotifyWorkers();
     return SubmitResult::accepted;
 }

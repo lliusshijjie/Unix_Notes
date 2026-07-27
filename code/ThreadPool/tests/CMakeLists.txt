@@ -16,5 +16,10 @@ add_executable(test_phase1
     test_phase1.cpp
     ../ThreadPool.cpp
 )
-
 target_include_directories(test_phase1 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+add_executable(bench_phase31
+    bench_phase31.cpp
+    ../ThreadPool.cpp
+)
+target_include_directories(bench_phase31 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
