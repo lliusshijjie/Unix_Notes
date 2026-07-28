@@ -4,6 +4,7 @@
 #include <new>
 #include <type_traits>
 #include <utility>
+#include <cassert>
 
 template <class Signature>
 class MoveOnlyFunction;
@@ -30,6 +31,11 @@ public:
         : m_ptr(nullptr)
         , m_local(false)
     {
+        static_assert(
+            std::is_invocable_r_v<void, Decayed&>,
+            "F must be callable as void()"
+        );
+
         using Decayed = typename std::decay<F>::type;
         using Impl = CallableImpl<Decayed>;
         if (sizeof(Impl) <= BufferSize
@@ -78,6 +84,7 @@ public:
 
     void operator()()
     {
+        assert(m_ptr != nullptr);    
         m_ptr->Invoke();
     }
 

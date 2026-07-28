@@ -95,7 +95,7 @@ template <class Rep, class Period>
 SubmitResult MyThreadPool::post_for(Task task, const std::chrono::duration<Rep, Period>& timeout) {
     if (tls_local_queue) {
         tls_local_queue->PushOwner(std::move(task));
-        NotifyAllWorkers();
+        NotifyAnyWorker();
         return SubmitResult::accepted;
     }
 
@@ -119,6 +119,6 @@ SubmitResult MyThreadPool::post_for(Task task, const std::chrono::duration<Rep, 
         tasks.emplace(std::move(task));
     }
 
-    NotifyAllWorkers();
+    NotifyAnyWorker();
     return SubmitResult::accepted;
 }
