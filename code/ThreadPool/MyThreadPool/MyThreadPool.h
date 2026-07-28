@@ -1,16 +1,20 @@
 #pragma once 
 
-#include <vector>
-#include <thread>
-#include <queue>
-#include <functional>
-#include <mutex>
-#include <condition_variable>
-#include <future>
-#include <stdexcept>
-#include <type_traits>
+#include "MyBoundedRingQueue.h"
+#include "MyLocalTaskQueue.h"
+#include "MyMoveOnlyFunction.h"
+
 #include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 enum class SubmitResult {
     accepted,
@@ -25,14 +29,23 @@ enum class RejectPolicy {
     discard
 };
 
-class ThreadPool {
+class MyThreadPool {
     using Task = std::function<void()>;
 
 private:
     void post(Task task);
+    void WorkerLoop(std::size_t worker_index);
+    bool TrySteal(Task& task, std::size_t worker_index);
+    bool HasStealableWorker(std::size_t worker_index) const;
+    bool AllLocalEmpty() const;
+    bool HasAnyWork(std::size_t worker_index) const;
+    void NotifyAnyWorker();
+
+    static thread_local MyLocalTaskQueue* tls_local_queue;
 
     std::vector<std::thread> workers;
-    std::queue<Task> tasks;
+    std::vector<std::unique_ptr<MyLocalTaskQueue>> local_queues;
+    MyBoundedRingQueue<Task> tasks;
     std::size_t queue_capacity;
     RejectPolicy reject_policy;
     std::mutex mutex;
@@ -42,9 +55,9 @@ private:
 
 public:
 
-    explicit ThreadPool(std::size_t thread_count, std::size_t queue_capacity, RejectPolicy reject_policy = RejectPolicy::abort);
+    explicit MyThreadPool(std::size_t thread_count, std::size_t queue_capacity, RejectPolicy reject_policy = RejectPolicy::abort);
     
-    ~ThreadPool();
+    ~MyThreadPool();
 
     // Try to post a task to the thread pool. If the pool is stopping or the queue is full, it will return an appropriate SubmitResult.
     SubmitResult try_post(Task task);
@@ -59,29 +72,33 @@ public:
     template <class F, class... Args>
     auto submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>;
 
-    ThreadPool(const ThreadPool&) = delete;
-    ThreadPool& operator=(const ThreadPool&) = delete;
+    MyThreadPool(const MyThreadPool&) = delete;
+    MyThreadPool& operator=(const MyThreadPool&) = delete;
 
 };
 
 // Implementation of the submit function
 // This function allows users to submit tasks to the thread pool and get a future for the result.
 template <class F, class... Args>
-auto ThreadPool::submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>> {
+auto MyThreadPool::submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>> {
     using return_type = std::invoke_result_t<F, Args...>;
 
-    auto task = std::make_shared<std::packaged_task<return_type()>>(
+    std::packaged_task<return_type()> packaged(
         std::bind(std::forward<F>(f), std::forward<Args>(args)...));
 
-    std::future<return_type> result = task->get_future();
-    // The task is wrapped in a lambda and posted to the thread pool's task queue.
-    post([task]() { (*task)(); });
-
+    std::future<return_type> result = packaged.get_future();
+    post([packaged = std::move(packaged)]() mutable { packaged(); });
     return result;
 }
 
 template <class Rep, class Period>
-SubmitResult ThreadPool::post_for(Task task, const std::chrono::duration<Rep, Period>& timeout) {
+SubmitResult MyThreadPool::post_for(Task task, const std::chrono::duration<Rep, Period>& timeout) {
+    if (tls_local_queue) {
+        tls_local_queue->PushOwner(std::move(task));
+        NotifyAllWorkers();
+        return SubmitResult::accepted;
+    }
+
     {
         std::unique_lock<std::mutex> lock(mutex);
         if (stopping) {
@@ -102,6 +119,6 @@ SubmitResult ThreadPool::post_for(Task task, const std::chrono::duration<Rep, Pe
         tasks.emplace(std::move(task));
     }
 
-    not_empty.notify_one();
+    NotifyAllWorkers();
     return SubmitResult::accepted;
 }

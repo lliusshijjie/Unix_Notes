@@ -50,6 +50,10 @@ public:
 
     void push(T&& value)
     {
+        if (full())
+        {
+            throw std::runtime_error("queue is full");
+        }
         m_buffer[m_tail] = std::move(value);
         m_tail = (m_tail + 1) % m_capacity;
         ++m_size;
@@ -57,6 +61,10 @@ public:
 
     T pop()
     {
+        if (empty())
+        {
+            throw std::runtime_error("queue is empty");
+        }
         T value = std::move(m_buffer[m_head]);
         m_buffer[m_head] = T();
         m_head = (m_head + 1) % m_capacity;
