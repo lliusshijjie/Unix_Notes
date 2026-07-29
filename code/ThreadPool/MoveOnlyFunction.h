@@ -31,16 +31,16 @@ public:
         : m_ptr(nullptr)
         , m_local(false)
     {
+        using Decayed = typename std::decay<F>::type;
+        using Impl = CallableImpl<Decayed>;
         static_assert(
             std::is_invocable_r_v<void, Decayed&>,
             "F must be callable as void()"
         );
 
-        using Decayed = typename std::decay<F>::type;
-        using Impl = CallableImpl<Decayed>;
-        if (sizeof(Impl) <= BufferSize
-            && alignof(Impl) <= alignof(std::max_align_t)
-            && std::is_nothrow_move_constructible<Decayed>::value)
+        if constexpr (sizeof(Impl) <= BufferSize
+                      && alignof(Impl) <= alignof(std::max_align_t)
+                      && std::is_nothrow_move_constructible<Decayed>::value)
         {
             m_ptr = ::new (static_cast<void*>(m_buffer)) Impl(std::forward<F>(f));
             m_local = true;
