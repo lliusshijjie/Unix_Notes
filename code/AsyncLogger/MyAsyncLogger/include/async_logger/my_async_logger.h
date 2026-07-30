@@ -67,13 +67,13 @@ private:
         Failed
     };
 
-    void work_entry() noexcept;
-    void work_loop();
-    void fail_work(const char* message) noexcept;
+    void worker_entry() noexcept;
+    void worker_loop();
+    void fail_worker(const char* message) noexcept;
     void write_record(const LogRecord& record);
     void rotate_if_needed(std::size_t next_record_size);
     void flush_output();
-    std::string format_record(const LogRecord& record) noexcept;
+    std::string format_record(const LogRecord& record) const;
     void validate_config() const;
 
     LoggerConfig config_;
