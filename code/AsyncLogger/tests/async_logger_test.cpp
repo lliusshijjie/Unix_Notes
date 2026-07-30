@@ -1,6 +1,8 @@
 #include "async_logger/async_logger.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +27,10 @@ void expect(bool condition, const char* name) {
 std::string read_file(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+std::size_t line_count(const std::string& content) {
+    return static_cast<std::size_t>(std::count(content.begin(), content.end(), '\n'));
 }
 
 void test_filter_flush_and_stop(const std::filesystem::path& path) {
@@ -61,8 +67,8 @@ void test_concurrent_logging(const std::filesystem::path& path) {
     AsyncLogger logger(config);
     logger.start();
 
-    constexpr int worker_count = 4;
-    constexpr int records_per_worker = 100;
+    constexpr int worker_count = 8;
+    constexpr int records_per_worker = 1000;
     std::atomic<int> accepted{0};
     std::vector<std::thread> workers;
     for (int worker = 0; worker < worker_count; ++worker) {
@@ -82,6 +88,62 @@ void test_concurrent_logging(const std::filesystem::path& path) {
     logger.stop();
     expect(accepted.load() == worker_count * records_per_worker, "Concurrent logs accepted");
     expect(logger.accepted_count() == logger.written_count(), "Concurrent logs drained on stop");
+    expect(line_count(read_file(path)) == logger.written_count(),
+           "MPSC stress test writes every accepted record once");
+}
+
+void test_fixed_record_and_timestamp_format(const std::filesystem::path& path) {
+    LoggerConfig config;
+    config.file_path = path;
+    config.min_level = LogLevel::Trace;
+    config.flush_interval = std::chrono::milliseconds(10);
+
+    AsyncLogger logger(config);
+    logger.start();
+    const std::string oversized_message(1024, '~');
+    expect(LOG_INFO(logger, oversized_message), "Fixed-buffer record accepted");
+    logger.flush();
+    logger.stop();
+
+    const std::string content = read_file(path);
+    const std::size_t marker_count =
+        static_cast<std::size_t>(std::count(content.begin(), content.end(), '~'));
+    expect(marker_count == kMaxLogMessageSize - 1,
+           "Oversized message is safely truncated to fixed buffer capacity");
+    expect(content.size() >= 26 && content[4] == '-' && content[7] == '-' &&
+               content[10] == ' ' && content[19] == '.',
+           "Log timestamp has cached date prefix and microsecond format");
+}
+
+void test_drop_newest_with_mpsc_contention(const std::filesystem::path& path) {
+    LoggerConfig config;
+    config.file_path = path;
+    config.min_level = LogLevel::Trace;
+    config.max_queue_size = 2;
+    config.overflow_policy = OverflowPolicy::DropNewest;
+    config.flush_interval = std::chrono::milliseconds(10);
+
+    AsyncLogger logger(config);
+    logger.start();
+    constexpr int worker_count = 12;
+    constexpr int records_per_worker = 1000;
+    std::vector<std::thread> workers;
+    for (int worker = 0; worker < worker_count; ++worker) {
+        workers.emplace_back([&logger] {
+            for (int index = 0; index < records_per_worker; ++index) {
+                (void)LOG_DEBUG(logger, "drop-contention");
+            }
+        });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+    logger.stop();
+
+    const std::uint64_t total = static_cast<std::uint64_t>(worker_count) * records_per_worker;
+    expect(logger.accepted_count() + logger.dropped_count() == total,
+           "DropNewest accounts for every submitted record");
+    expect(logger.dropped_count() > 0, "DropNewest drops records when MPSC ring is saturated");
 }
 
 void test_rotation(const std::filesystem::path& path) {
@@ -113,6 +175,8 @@ int main() {
 
     test_filter_flush_and_stop(root / "filter.log");
     test_concurrent_logging(root / "concurrent.log");
+    test_fixed_record_and_timestamp_format(root / "fixed.log");
+    test_drop_newest_with_mpsc_contention(root / "drop.log");
     test_rotation(root / "rotate.log");
 
     std::error_code error;

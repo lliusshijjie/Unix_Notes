@@ -1,12 +1,11 @@
 #include <algorithm>
-#include <ctime>
+#include <cstdio>
+#include <cstring>
 #include <exception>
-#include <iomanip>
 #include <iostream>
 #include <limits>
-#include <optional>
-#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 #include <utility>
 
@@ -32,10 +31,19 @@ std::filesystem::path backup_path(const std::filesystem::path& path, std::size_t
     return std::filesystem::path(path.string() + "." + std::to_string(index));
 }
 
+void update_max(std::atomic<std::uint64_t>& target, std::uint64_t value) noexcept {
+    std::uint64_t current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value, std::memory_order_release,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
 } // namespace
 
 AsyncLogger::AsyncLogger(LoggerConfig config) 
-    : config_(std::move(config)) {}
+    : config_(std::move(config))
+    , queue_(config_.max_queue_size) {}
 
 AsyncLogger::~AsyncLogger() noexcept {
     try {
@@ -54,20 +62,18 @@ void AsyncLogger::validate_config() const {
     if (config_.flush_interval <= std::chrono::milliseconds::zero()) {
         throw std::invalid_argument("logger flush_interval must be positive");
     }
+    if (config_.batch_buffer_size < kFormattedLogRecordSize) {
+        throw std::invalid_argument("logger batch_buffer_size is too small");
+    }
 }
 
 void AsyncLogger::start() {
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ != State::Created) {
-            throw std::logic_error("AsyncLogger can only be started once");
-        }
+    if (state_.load(std::memory_order_acquire) != State::Created) {
+        throw std::logic_error("AsyncLogger can only be started once");
     }
 
     validate_config();
-
     const std::filesystem::path parent = config_.file_path.parent_path();
     if (!parent.empty()) {
         std::error_code error;
@@ -93,137 +99,136 @@ void AsyncLogger::start() {
     }
 
     try {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            state_ = State::Running;
-        }
+        active_buffer_.resize(config_.batch_buffer_size);
+        write_buffer_.resize(config_.batch_buffer_size);
+        state_.store(State::Running, std::memory_order_release);
         worker_ = std::thread(&AsyncLogger::worker_entry, this);
     } catch(...) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            state_ = State::Created;
-        }
+        state_.store(State::Created, std::memory_order_release);
         output_.close();
+        active_buffer_.clear();
+        write_buffer_.clear();
         throw;
     }
 }
 
 bool AsyncLogger::log(LogLevel level,
-                      std::string message,
+                      std::string_view message,
                       const char* file,
                       int line,
                       const char* function) {
     if (level < config_.min_level) {
         return true;
     }
-
-    LogRecord record {
-        std::chrono::system_clock::now(),
-        level,
-        std::this_thread::get_id(),
-        file == nullptr ? "" : file,
-        line,
-        function == nullptr ? "" : function,
-        std::move(message),
-        0,
-    };
-
-    bool should_flush = false;
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (state_ != State::Running) {
-            return false;
-        }
-
-        if (config_.overflow_policy == OverflowPolicy::Block) {
-            space_cv_.wait(lock, [this] {
-                return queue_.size() < config_.max_queue_size || state_ != State::Running;
-            });
-            if (state_ != State::Running) {
-                return false;
-            }
-        } else if (queue_.size() >= config_.max_queue_size) {
-            dropped_count_.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-
-        record.sequence = next_sequence_++;
-        queue_.push_back(std::move(record));
-        accepted_count_.fetch_add(1, std::memory_order_relaxed);
-        should_flush = config_.flush_on_error && level >= LogLevel::Error;
+    if (state_.load(std::memory_order_acquire) != State::Running) {
+        return false;
     }
 
-    data_cv_.notify_one();
-    if (should_flush) {
+    active_producers_.fetch_add(1, std::memory_order_acq_rel);
+    const auto producer_done = [this] { finish_producer(); };
+    if (state_.load(std::memory_order_acquire) != State::Running) {
+        producer_done();
+        return false;
+    }
+    
+    LogRecord record;
+    record.timestamp = std::chrono::system_clock::now();
+    record.level = level;
+    record.thread_id = static_cast<std::uint64_t>(std::hash<std::thread::id>{}(
+        std::this_thread::get_id()));
+    record.file.assign(file == nullptr ? std::string_view{} : std::string_view(file));
+    record.line = line;
+    record.function.assign(function == nullptr ? std::string_view{} : std::string_view(function));
+    record.message.assign(message);
+    record.sequence = next_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    std::size_t previous_pending = 0;
+    for(;;) {
+        previous_pending = pending_count_.fetch_add(1, std::memory_order_acq_rel);
+        if (queue_.try_enqueue(std::move(record))) {
+            break;
+        }
+        pending_count_.fetch_sub(1, std::memory_order_release);
+        if (config_.overflow_policy == OverflowPolicy::DropNewest) {
+            dropped_count_.fetch_add(1, std::memory_order_release);
+            producer_done();
+            return false;
+        }
+
+        std::unique_lock<std::mutex> lock(space_mutex_);
+        space_cv_.wait(lock, [this] {
+            return state_.load(std::memory_order_acquire) != State::Running || !queue_.full();
+        });
+        if (state_.load(std::memory_order_acquire) != State::Running) {
+            producer_done();
+            return false;
+        }
+    }
+
+    accepted_count_.fetch_add(1, std::memory_order_release);
+    producer_done();
+    if (previous_pending == 0) {
+        notify_worker();
+    }
+
+    if (config_.flush_on_error && level >= LogLevel::Error) {
         flush();
     }
     return true;
 }
 
 void AsyncLogger::flush() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    if (state_ == State::Created || state_ == State::Stopped) {
-        return;
+    if (state_.load(std::memory_order_acquire) == State::Created || 
+        state_.load(std::memory_order_acquire) == State::Stopped ||
+        state_.load(std::memory_order_acquire) == State::Failed) {
+            return;
     }
 
-    const std::uint64_t target = next_sequence_;
-    if (state_ == State::Failed) {
-        return;
-    }
+    const std::uint64_t target = accepted_count_.load(std::memory_order_acquire);
+    update_max(flush_target_count_, target);
+    flush_requested_.store(true, std::memory_order_release);
+    notify_worker();
 
-    flush_target_sequence_ = std::max(flush_target_sequence_, target);
-    flush_requested_ = true;
-    lock.unlock();
-    data_cv_.notify_one();
-    lock.lock();
-
+    std::unique_lock<std::mutex> lock(flush_mutex_);
     flush_cv_.wait(lock, [this, target] {
-        return last_flushed_sequence_ >= target || state_ == State::Failed || 
-               state_ == State::Stopped;
+        const State state = state_.load(std::memory_order_acquire);
+        return last_flushed_count_.load(std::memory_order_acquire) >= target || 
+               state_ == State::Failed || state_ == State::Stopped;
     });
 }
 
 void AsyncLogger::stop() {
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-
-    bool join_worker = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (state_ == State::Created) {
-            state_ = State::Stopped;
-            return;
-        }
-        if (state_ == State::Stopped) {
-            return;
-        }
-        if (state_ == State::Running) {
-            state_ = State::Stopping;
-        }
-        join_worker = worker_.joinable();
+    State current = state_.load(std::memory_order_acquire);
+    if (current == State::Created) {
+        state_.store(State::Stopped, std::memory_order_release);
+        return;
+    }
+    if (current == State::Stopped) {
+        return;
+    }
+    if (state_ == State::Running) {
+        state_.store(State::Stopping, std::memory_order_release);
     }
 
-    data_cv_.notify_all();
+    notify_worker();
     space_cv_.notify_all();
     flush_cv_.notify_all();
-
-    if (join_worker) {
+    if (worker_.joinable()) {
         worker_.join();
     }
-
     if (output_.is_open()) {
         output_.close();
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (state_ != State::Failed) {
-        state_ = State::Stopped;
+    if (state_.load(std::memory_order_acquire) != State::Failed) {
+        state_.store(State::Stopped, std::memory_order_release);
     }
     flush_cv_.notify_all();
 }
 
 bool AsyncLogger::is_running() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return state_ == State::Running;
+    return state_.load(std::memory_order_acquire) == State::Running;
 }
 
 bool AsyncLogger::has_error() const noexcept {
@@ -242,6 +247,18 @@ std::uint64_t AsyncLogger::dropped_count() const noexcept {
     return dropped_count_.load(std::memory_order_relaxed);
 }
 
+void AsyncLogger::notify_worker() noexcept {
+    std::lock_guard<std::mutex> lock(wake_mutex_);
+    data_cv_.notify_one();
+}
+
+void AsyncLogger::finish_producer() noexcept {
+    active_producers_.fetch_sub(1, std::memory_order_release);
+    if (state_.load(std::memory_order_acquire) != State::Running) {
+        notify_worker();
+    }
+}
+
 void AsyncLogger::worker_entry() noexcept {
     try {
         worker_loop();
@@ -252,104 +269,134 @@ void AsyncLogger::worker_entry() noexcept {
     }
 } 
 
-void AsyncLogger::fail_worker(const char* message) {
+void AsyncLogger::fail_worker(const char* message) noexcept {
     std::cerr << "AsyncLogger worker error:" << message << "\n";
     has_error_.store(true, std::memory_order_relaxed);
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        state_ = State::Failed;
-    }
-    data_cv_.notify_all();
+    state_.store(State::Failed, std::memory_order_release);
+    notify_worker();
     space_cv_.notify_all();
     flush_cv_.notify_all();
 }
 
 void AsyncLogger::worker_loop() {
     auto next_periodic_flush = std::chrono::steady_clock::now() + config_.flush_interval;
-    
+
     for (;;) {
-        std::optional<LogRecord> record;
-        bool should_flush = false;
-
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            data_cv_.wait_until(lock, next_periodic_flush, [this] {
-                return !queue_.empty() || state_ != State::Running || flush_requested_;
-            });
-
-            if (!queue_.empty()) {
-                record.emplace(std::move(queue_.front()));
-                queue_.pop_front();
-                space_cv_.notify_one();
-            } else if (state_ == State::Stopping) {
-                lock.unlock();
-                flush_output();
-                lock.lock();
-                last_flushed_sequence_ = std::max(last_flushed_sequence_, last_written_sequence_);
-                flush_requested_ = false;
-                flush_cv_.notify_all();
-                return;
-            } else {
-                should_flush = flush_requested_ || std::chrono::steady_clock::now() >= next_periodic_flush;
-            }
-        }
-
-        if (record.has_value()) {
-            write_record(*record);
+        LogRecord record;
+        bool consumed = false;
+        while (queue_.try_dequeue(record)) {
+            pending_count_.fetch_sub(1, std::memory_order_release);
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                last_written_sequence_ = std::max(last_written_sequence_, record->sequence);
-                written_count_.fetch_add(1, std::memory_order_relaxed);
-                should_flush = flush_requested_ || last_written_sequence_ >= flush_target_sequence_;
+                std::lock_guard<std::mutex> lock(space_mutex_);
+                space_cv_.notify_one();
             }
+            append_record(record);
+            consumed = true;
         }
 
-        if (should_flush) {
+        const State current = state_.load(std::memory_order_acquire);
+        const bool stopping_and_drained =
+            current == State::Stopping && pending_count_.load(std::memory_order_acquire) == 0 &&
+            active_producers_.load(std::memory_order_acquire) == 0;
+        const bool flush_due = flush_requested_.load(std::memory_order_acquire) ||
+                               std::chrono::steady_clock::now() >= next_periodic_flush ||
+                               stopping_and_drained;
+
+        if (flush_due) {
+            write_active_buffer();
             flush_output();
-            std::lock_guard<std::mutex> lock(mutex_);
-            last_flushed_sequence_ = std::max(last_flushed_sequence_, last_written_sequence_);
-            if (flush_requested_ && last_written_sequence_ >= flush_target_sequence_) {
-                flush_requested_ = false;
+            const std::uint64_t written = written_count_.load(std::memory_order_acquire);
+            last_flushed_count_.store(written, std::memory_order_release);
+            if (written >= flush_target_count_.load(std::memory_order_acquire)) {
+                flush_requested_.store(false, std::memory_order_release);
             }
             flush_cv_.notify_all();
-        }
-
-        if (std::chrono::steady_clock::now() >= next_periodic_flush) {
-            if (!should_flush) {
-                flush_output();
-                std::lock_guard<std::mutex> lock(mutex_);
-                last_flushed_sequence_ = std::max(last_flushed_sequence_, last_written_sequence_);
-                flush_cv_.notify_all();
-            }
             next_periodic_flush = std::chrono::steady_clock::now() + config_.flush_interval;
         }
+
+        if (stopping_and_drained) {
+            return;
+        }
+        if (current == State::Failed) {
+            return;
+        }
+        if (consumed || pending_count_.load(std::memory_order_acquire) != 0) {
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(wake_mutex_);
+        data_cv_.wait_until(lock, next_periodic_flush, [this] {
+            return pending_count_.load(std::memory_order_acquire) != 0 ||
+                   flush_requested_.load(std::memory_order_acquire) ||
+                   state_.load(std::memory_order_acquire) != State::Running;
+        });
     }
 }
 
-std::string AsyncLogger::format_record(const LogRecord& record) const {
-    const auto seconds = std::chrono::system_clock::to_time_t(record.timestamp);
-    const auto mircos = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            record.timestamp.time_since_epoch()) % 
+std::size_t AsyncLogger::format_record(const LogRecord& record, char* destination,
+                                       std::size_t capacity) {
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(record.timestamp);
+    if (!has_cached_time_ || seconds != cached_second_) {
+        const std::tm calendar_time = local_time(seconds);
+        if (std::strftime(cached_time_text_.data(), cached_time_text_.size(), "%Y-%m-%d %H:%M:%S",
+                          &calendar_time) == 0) {
+            throw std::runtime_error("failed to format log timestamp");
+        }
+        cached_second_ = seconds;
+        has_cached_time_ = true;
+    }
+
+    const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
+                            record.timestamp.time_since_epoch()) %
                         std::chrono::seconds(1);
-
-    const std::tm calendar_time = local_time(seconds);
-    std::ostringstream stream;
-    stream << std::put_time(&calendar_time, "%Y-%m-%d %H:%M:%S") << "."
-           << std::setw(6) << std::setfill('0') << mircos.count() << std::setfill(' ')
-           << " [" << to_string(record.level) << "] [tid =" << record.thread_id << "] ["
-           << record.file << ':' << record.line << ' ' << record.function << "] "
-           << record.message << '\n';
-    return stream.str();
+    const std::string_view level_text = to_string(record.level);
+    const int result = std::snprintf(
+        destination, capacity, "%s.%06lld [%.*s] [tid=%llu] [%.*s:%d %.*s] %.*s\n",
+        cached_time_text_.data(), static_cast<long long>(micros.count()),
+        static_cast<int>(level_text.size()), level_text.data(),
+        static_cast<unsigned long long>(record.thread_id),
+        static_cast<int>(record.file.view().size()), record.file.view().data(), record.line,
+        static_cast<int>(record.function.view().size()), record.function.view().data(),
+        static_cast<int>(record.message.view().size()), record.message.view().data());
+    if (result < 0) {
+        throw std::runtime_error("failed to format log record");
+    }
+    if (static_cast<std::size_t>(result) >= capacity) {
+        destination[capacity - 2] = '\n';
+        destination[capacity - 1] = '\0';
+        return capacity - 1;
+    }
+    return static_cast<std::size_t>(result);
 }
 
-void AsyncLogger::write_record(const LogRecord& record) {
-    const std::string formatted = format_record(record);
-    rotate_if_needed(formatted.size());
-    output_ << formatted;
-    if (!output_) {
-        throw std::runtime_error("failed to write log record");
+void AsyncLogger::append_record(const LogRecord& record) {
+    std::array<char, kFormattedLogRecordSize> formatted{};
+    const std::size_t formatted_size = format_record(record, formatted.data(), formatted.size());
+    rotate_if_needed(formatted_size);
+    if (active_buffer_size_ + formatted_size > active_buffer_.size()) {
+        write_active_buffer();
     }
-    current_file_size_ += formatted.size();
+    std::memcpy(active_buffer_.data() + active_buffer_size_, formatted.data(), formatted_size);
+    active_buffer_size_ += formatted_size;
+    active_record_count_++;
+}
+
+void AsyncLogger::write_active_buffer() {
+    if (active_buffer_size_ == 0) {
+        return;
+    }
+    std::swap(active_buffer_, write_buffer_);
+    const std::size_t write_size = active_buffer_size_;
+    const std::size_t write_records = active_record_count_;
+    active_buffer_size_ = 0;
+    active_record_count_ = 0;
+
+    output_.write(write_buffer_.data(), static_cast<std::streamsize>(write_size));
+    if (!output_) {
+        throw std::runtime_error("failed to write log batch");
+    }
+    current_file_size_ += write_size;
+    written_count_.fetch_add(write_records, std::memory_order_release);
 }
 
 void AsyncLogger::flush_output() {
@@ -360,12 +407,15 @@ void AsyncLogger::flush_output() {
 }
 
 void AsyncLogger::rotate_if_needed(std::size_t next_record_size) {
-    if (config_.max_file_size == 0 || current_file_size_ == 0 ||
-        next_record_size <= config_.max_file_size - std::min(current_file_size_, config_.max_file_size)) {
+    if (config_.max_file_size == 0 || 
+        (current_file_size_ == 0 && active_buffer_size_ == 0) ||
+        (current_file_size_ <= config_.max_file_size &&
+        active_buffer_size_ <= config_.max_file_size - current_file_size_ &&
+        next_record_size <= config_.max_file_size - current_file_size_ - active_buffer_size_)) {
         return;
     }    
 
-    flush_output();
+    write_active_buffer();
     output_.close();
     if (config_.max_backup_files == 0) {
         output_.open(config_.file_path, std::ios::out | std::ios::trunc);

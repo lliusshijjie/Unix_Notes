@@ -27,5 +27,10 @@ target_link_libraries(async_logger_example PRIVATE async_logger)
 add_executable(async_logger_test tests/async_logger_test.cpp)
 target_link_libraries(async_logger_test PRIVATE async_logger)
 
+add_executable(async_logger_compile_filter_test tests/compile_filter_test.cpp)
+target_link_libraries(async_logger_compile_filter_test PRIVATE async_logger)
+target_compile_definitions(async_logger_compile_filter_test PRIVATE ASYNC_LOG_COMPILED_MIN_LEVEL=3)
+
 enable_testing()
 add_test(NAME async_logger_test COMMAND async_logger_test)
+add_test(NAME async_logger_compile_filter_test COMMAND async_logger_compile_filter_test)
