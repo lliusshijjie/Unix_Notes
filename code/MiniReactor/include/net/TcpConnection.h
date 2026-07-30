@@ -1,0 +1,56 @@
+#pragma once
+
+#include "base/NonCopyable.h"
+
+#include "net/Buffer.h"
+#include "net/Channel.h"
+#include "net/Socket.h"
+
+#include <functional>
+#include <memory>
+#include <string>
+
+namespace minireactor {
+
+class EventLoop;
+
+class TcpConnection : public std::enable_shared_from_this<TcpConnection>, private NonCopyable {
+public:
+    enum class State { kDisconnected, kConnected };
+    using ConnectionCallback = std::function<void(const std::shared_ptr<TcpConnection>&)>;
+    using MessageCallback = std::function<void(const std::shared_ptr<TcpConnection>&, Buffer*)>;
+    using CloseCallback = std::function<void(const std::shared_ptr<TcpConnection>&)>;
+
+    TcpConnection(EventLoop* loop, std::string name, int socketFd);
+    ~TcpConnection() = default;
+
+    const std::string& name() const;
+    State state() const;
+    void setConnectionCallback(ConnectionCallback callback);
+    void setMessageCallback(MessageCallback callback);
+    void setCloseCallback(CloseCallback callback);
+
+    void connectEstablished();
+    void connectDestroyed();
+    void send(const std::string& message);
+    void shutdown();
+
+private:
+    void handleRead();
+    void handleWrite();
+    void handleClose();
+    void handleError();
+
+    EventLoop* loop_;
+    const std::string name_;
+    State state_ = State::kDisconnected;
+    Socket socket_;
+    Channel channel_;
+    Buffer inputBuffer_;
+    Buffer outputBuffer_;
+    ConnectionCallback connectionCallback_;
+    MessageCallback messageCallback_;
+    CloseCallback closeCallback_;
+};
+
+}  // namespace minireactor
