@@ -53,10 +53,16 @@ std::vector<Channel*> EpollPoller::poll(int timeoutMs) {
 }
 
 void EpollPoller::updateChannel(Channel* channel) {
-    const auto found = channels_.find(channel->fd());
-    if (found == channels_.end()) {
-        channels_.emplace(channel->fd(), channel);
+    const Channel::Index index = channel->index();
+    if (index == Channel::Index::kNew || index == Channel::Index::kDeleted) {
+        if (index == Channel::Index::kNew) {
+            channels_.emplace(channel->fd(), channel);
+        }
+        channel->setIndex(Channel::Index::kAdded);
         update(EPOLL_CTL_ADD, channel);
+    } else if (channel->isNoneEvent()) {
+        update(EPOLL_CTL_DEL, channel);
+        channel->setIndex(Channel::Index::kDeleted);
     } else {
         update(EPOLL_CTL_MOD, channel);
     }
@@ -67,10 +73,11 @@ void EpollPoller::removeChannel(Channel* channel) {
     if (found == channels_.end()) {
         return;
     }
-    if (::epoll_ctl(epollFd_, EPOLL_CTL_DEL, channel->fd(), nullptr) < 0 && errno != ENOENT) {
-        throwSystemError("epoll_ctl DEL");
+    if (channel->index() == Channel::Index::kAdded) {
+        update(EPOLL_CTL_DEL, channel);
     }
     channels_.erase(found);
+    channel->setIndex(Channel::Index::kNew);
 }
 
 void EpollPoller::update(int operation, Channel* channel) {
@@ -78,7 +85,12 @@ void EpollPoller::update(int operation, Channel* channel) {
     event.events = channel->events();
     event.data.ptr = channel;
     if (::epoll_ctl(epollFd_, operation, channel->fd(), &event) < 0) {
-        throwSystemError(operation == EPOLL_CTL_ADD ? "epoll_ctl ADD" : "epoll_ctl MOD");
+        if (operation == EPOLL_CTL_DEL && errno == ENOENT) {
+            return;
+        }
+        throwSystemError(operation == EPOLL_CTL_ADD ? "epoll_ctl ADD"
+                                                     : operation == EPOLL_CTL_MOD ? "epoll_ctl MOD"
+                                                                                  : "epoll_ctl DEL");
     }
 }
 

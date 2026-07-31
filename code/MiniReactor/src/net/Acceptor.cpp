@@ -15,6 +15,7 @@ Acceptor::Acceptor(EventLoop* loop, std::uint16_t port, const char* bindIp)
       bindIp_(bindIp) {
     acceptSocket_.setReuseAddr(true);
     acceptChannel_.setReadCallback([this] { handleRead(); });
+    acceptChannel_.enableEdgeTrigger();
 }
 
 void Acceptor::setNewConnectionCallback(NewConnectionCallback callback) {

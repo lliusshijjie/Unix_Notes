@@ -16,7 +16,7 @@ class EventLoop;
 
 class TcpConnection : public std::enable_shared_from_this<TcpConnection>, private NonCopyable {
 public:
-    enum class State { kDisconnected, kConnected };
+    enum class State { kConnecting, kConnected, kDisconnecting, kDisconnected };
     using ConnectionCallback = std::function<void(const std::shared_ptr<TcpConnection>&)>;
     using MessageCallback = std::function<void(const std::shared_ptr<TcpConnection>&, Buffer*)>;
     using CloseCallback = std::function<void(const std::shared_ptr<TcpConnection>&)>;
@@ -26,13 +26,14 @@ public:
 
     const std::string& name() const;
     State state() const;
+    EventLoop* loop() const;
     void setConnectionCallback(ConnectionCallback callback);
     void setMessageCallback(MessageCallback callback);
     void setCloseCallback(CloseCallback callback);
 
     void connectEstablished();
     void connectDestroyed();
-    void send(const std::string& message);
+    void send(std::string message);
     void shutdown();
 
 private:
@@ -40,6 +41,8 @@ private:
     void handleWrite();
     void handleClose();
     void handleError();
+    void sendInLoop(std::string message);
+    void shutdownInLoop();
 
     EventLoop* loop_;
     const std::string name_;
