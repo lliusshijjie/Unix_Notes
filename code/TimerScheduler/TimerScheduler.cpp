@@ -264,6 +264,26 @@ void TimerScheduler::worker_loop(std::shared_ptr<SharedState> state, ThreadPool 
             });
 
         if (interrupted) {
+            /*
+             * 修复：堆顶任务被取消且尚未到期时，wait_until 的谓词
+             * （Cancelled）立即为真，wait_until 会带着锁立即返回，
+             * 导致调度线程持锁忙等（后续 stop()/schedule_*() 全部死锁）。
+             * 这里先把堆顶已取消的任务弹出，再重新评估。
+             */
+            for (;;) {
+                if (state->tasks.empty()) {
+                    break;
+                }
+                const auto top_id = state->tasks.top().id;
+                const auto state_it = state->states.find(top_id);
+                if (state_it != state->states.end() &&
+                    state_it->second == TimerState::Cancelled) {
+                    state->tasks.pop();
+                    state->states.erase(state_it);
+                    continue;
+                }
+                break;
+            }
             continue;
         }
 
