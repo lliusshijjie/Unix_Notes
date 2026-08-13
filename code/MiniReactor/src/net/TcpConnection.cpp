@@ -1,10 +1,10 @@
 #include "net/TcpConnection.h"
 
+#include "base/Logger.h"
 #include "net/EventLoop.h"
 
 #include <cerrno>
 #include <cstring>
-#include <iostream>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <utility>
@@ -44,6 +44,7 @@ void TcpConnection::connectEstablished() {
     loop_->assertInLoopThread();
     state_ = State::kConnected;
     channel_.enableReading();
+    MR_LOG_DEBUG(name_ + " established on loop thread");
     if (connectionCallback_) {
         connectionCallback_(shared_from_this());
     }
@@ -56,6 +57,7 @@ void TcpConnection::connectDestroyed() {
         channel_.disableAll();
     }
     channel_.remove();
+    MR_LOG_DEBUG(name_ + " destroyed");
     if (connectionCallback_) {
         connectionCallback_(shared_from_this());
     }
@@ -118,6 +120,24 @@ void TcpConnection::shutdownInLoop() {
             socket_.shutdownWrite();
         }
     }
+}
+
+void TcpConnection::forceClose() {
+    auto self = shared_from_this();
+    loop_->runInLoop([self] { self->forceCloseInLoop(); });
+}
+
+void TcpConnection::forceCloseInLoop() {
+    loop_->assertInLoopThread();
+    if (state_ == State::kConnected || state_ == State::kDisconnecting) {
+        MR_LOG_DEBUG(name_ + " force closed");
+        handleClose();
+    }
+}
+
+void TcpConnection::forceCloseWithDelay(double seconds) {
+    auto self = shared_from_this();
+    loop_->runAfter(seconds, [self] { self->forceClose(); });
 }
 
 void TcpConnection::handleRead() {
@@ -196,8 +216,9 @@ void TcpConnection::handleClose() {
 void TcpConnection::handleError() {
     int socketError = 0;
     socklen_t length = sizeof(socketError);
-    if (::getsockopt(socket_.fd(), SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 && socketError != 0) {
-        std::cerr << name_ << " socket error: " << std::strerror(socketError) << '\n';
+    if (::getsockopt(socket_.fd(), SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 &&
+        socketError != 0) {
+        MR_LOG_ERROR(name_ + " socket error: " + std::strerror(socketError));
     }
     handleClose();
 }

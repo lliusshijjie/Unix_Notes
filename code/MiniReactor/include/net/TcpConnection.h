@@ -35,6 +35,10 @@ public:
     void connectDestroyed();
     void send(std::string message);
     void shutdown();
+    // 主动断开连接（muduo 风格）。forceCloseWithDelay 在 delay 秒后断开，
+    // 由 EventLoop 定时器驱动，可用于空闲连接超时。
+    void forceClose();
+    void forceCloseWithDelay(double seconds);
 
 private:
     void handleRead();
@@ -43,6 +47,7 @@ private:
     void handleError();
     void sendInLoop(std::string message);
     void shutdownInLoop();
+    void forceCloseInLoop();
 
     EventLoop* loop_;
     const std::string name_;

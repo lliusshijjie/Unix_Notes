@@ -1,5 +1,6 @@
 #include "net/TcpServer.h"
 
+#include "base/Logger.h"
 #include "net/EventLoop.h"
 
 #include <stdexcept>
@@ -52,6 +53,7 @@ void TcpServer::newConnection(int socketFd, const sockaddr_in&) {
     });
     connections_.emplace(connectionName, connection);
     ioLoop->runInLoop([connection] { connection->connectEstablished(); });
+    MR_LOG_DEBUG(connectionName + " accepted, assigned to worker loop");
 }
 
 void TcpServer::removeConnection(const std::shared_ptr<TcpConnection>& connection) {
@@ -65,6 +67,7 @@ void TcpServer::removeConnectionInLoop(const std::shared_ptr<TcpConnection>& con
         return;
     }
     connections_.erase(found);
+    MR_LOG_DEBUG(connection->name() + " removed from server");
     connection->loop()->queueInLoop([connection] { connection->connectDestroyed(); });
 }
 

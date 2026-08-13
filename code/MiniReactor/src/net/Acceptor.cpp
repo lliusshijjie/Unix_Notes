@@ -1,8 +1,10 @@
 #include "net/Acceptor.h"
 
+#include "base/Logger.h"
 #include "net/EventLoop.h"
 
 #include <cerrno>
+#include <string>
 #include <utility>
 
 namespace minireactor {
@@ -30,6 +32,7 @@ void Acceptor::listen() {
     acceptSocket_.listen();
     listening_ = true;
     acceptChannel_.enableReading();
+    MR_LOG_INFO("acceptor listening on " + bindIp_ + ":" + std::to_string(port_));
 }
 
 void Acceptor::handleRead() {
