@@ -27,6 +27,7 @@ add_library(minireactor
     src/net/EventLoop.cpp
     src/net/EventLoopThread.cpp
     src/net/EventLoopThreadPool.cpp
+    src/net/InetAddress.cpp
     src/net/Socket.cpp
     src/net/TcpConnection.cpp
     src/net/TcpServer.cpp
@@ -77,3 +78,7 @@ add_test(NAME idle_timeout_test COMMAND idle_timeout_test)
 add_executable(logger_test test/LoggerTest.cpp)
 target_link_libraries(logger_test PRIVATE minireactor)
 add_test(NAME logger_test COMMAND logger_test)
+
+add_executable(inet_address_test test/InetAddressTest.cpp)
+target_link_libraries(inet_address_test PRIVATE minireactor)
+add_test(NAME inet_address_test COMMAND inet_address_test)
