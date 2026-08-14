@@ -48,11 +48,14 @@ int main() {
 
     std::promise<void> connected;
     auto connectedFuture = connected.get_future();
+    std::promise<void> reconnected;
+    auto reconnectedFuture = reconnected.get_future();
     std::promise<void> disconnected;
     auto disconnectedFuture = disconnected.get_future();
     std::promise<std::string> echoed;
     auto echoedFuture = echoed.get_future();
     std::atomic<int> disconnectCount{0};
+    std::atomic<int> connectCount{0};
     std::atomic<int> errorCount{0};
     std::mutex receivedMutex;
     std::string received;
@@ -66,7 +69,11 @@ int main() {
         client->setConnectionCallback(
             [&](const std::shared_ptr<minireactor::TcpConnection>& connection) {
                 if (connection->state() == minireactor::TcpConnection::State::kConnected) {
-                    connected.set_value();
+                    if (connectCount.fetch_add(1) == 0) {
+                        connected.set_value();
+                    } else {
+                        reconnected.set_value();
+                    }
                     return;
                 }
                 if (disconnectCount.fetch_add(1) == 0) {
@@ -104,6 +111,15 @@ int main() {
     std::this_thread::sleep_for(50ms);
     assert(disconnectCount.load() == 1);
 
+    connection.reset();
+    client->connect();
+    assert(reconnectedFuture.wait_for(2s) == std::future_status::ready);
+    assert(connectCount.load() == 2);
+
+    connection = client->connection();
+    assert(connection != nullptr);
+    client->stop();
+    std::this_thread::sleep_for(50ms);
     connection.reset();
     std::promise<void> clientDestroyed;
     auto clientDestroyedFuture = clientDestroyed.get_future();

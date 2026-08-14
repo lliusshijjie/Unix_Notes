@@ -176,8 +176,8 @@ int Connector::removeAndResetChannel() {
     const int socketFd = socketFd_;
     socketFd_ = -1;
 
-    std::shared_ptr<Connector> self = shared_from_this();
-    loop_->queueInLoop([self] { self->channel_.reset(); });
+    std::shared_ptr<Channel> removedChannel(channel_.release());
+    loop_->queueInLoop([removedChannel] {});
     return socketFd;
 }
 

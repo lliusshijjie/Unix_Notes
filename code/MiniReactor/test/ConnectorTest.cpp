@@ -126,10 +126,41 @@ void testStopCancelsPendingDelivery() {
     ::close(listener);
 }
 
+void testImmediateRestartAfterStop() {
+    using namespace std::chrono_literals;
+
+    std::uint16_t port = 0;
+    const int listener = createListener(port);
+
+    minireactor::EventLoopThread loopThread;
+    minireactor::EventLoop* loop = loopThread.startLoop();
+    auto connector = std::make_shared<minireactor::Connector>(
+        loop, minireactor::InetAddress("127.0.0.1", port));
+
+    std::promise<int> connected;
+    auto connectedFuture = connected.get_future();
+    connector->setNewConnectionCallback([&connected](int socketFd) {
+        connected.set_value(socketFd);
+    });
+
+    loop->queueInLoop([connector] {
+        connector->start();
+        connector->stop();
+        connector->start();
+    });
+
+    assert(connectedFuture.wait_for(2s) == std::future_status::ready);
+    ::close(connectedFuture.get());
+    connector->stop();
+    loop->quit();
+    ::close(listener);
+}
+
 }  // namespace
 
 int main() {
     testSuccessfulConnection();
     testRefusedConnection();
     testStopCancelsPendingDelivery();
+    testImmediateRestartAfterStop();
 }

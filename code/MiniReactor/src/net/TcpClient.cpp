@@ -105,6 +105,7 @@ void TcpClient::removeConnection(const std::shared_ptr<TcpConnection>& activeCon
             connection_.reset();
         }
     }
+    connector_->stop();
     activeConnection->connectDestroyed();
 }
 
