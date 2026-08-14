@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 
 project(MiniReactor LANGUAGES CXX)
 
+option(MINIREACTOR_BUILD_EXAMPLES "Build MiniReactor examples" ON)
+option(MINIREACTOR_BUILD_TESTS "Build MiniReactor tests" ON)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -46,6 +49,7 @@ target_include_directories(minireactor PUBLIC
 target_compile_options(minireactor PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(minireactor PUBLIC Threads::Threads async_logger)
 
+if(MINIREACTOR_BUILD_EXAMPLES)
 add_executable(echo_server example/EchoServer.cpp)
 target_link_libraries(echo_server PRIVATE minireactor)
 
@@ -56,7 +60,9 @@ add_executable(compute_server example/ComputeServer.cpp)
 target_link_libraries(compute_server PRIVATE minireactor)
 # BlockingQueue 轮子使用 std::span，要求 C++20（框架库本身保持 C++17）
 set_target_properties(compute_server PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+endif()
 
+if(MINIREACTOR_BUILD_TESTS)
 add_executable(buffer_test test/BufferTest.cpp)
 target_link_libraries(buffer_test PRIVATE minireactor)
 add_test(NAME buffer_test COMMAND buffer_test)
@@ -92,3 +98,4 @@ add_test(NAME connector_test COMMAND connector_test)
 add_executable(tcp_client_test test/TcpClientTest.cpp)
 target_link_libraries(tcp_client_test PRIVATE minireactor)
 add_test(NAME tcp_client_test COMMAND tcp_client_test)
+endif()

@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 
 project(MyAsyncLogger LANGUAGES CXX)
 
+option(ASYNC_LOGGER_BUILD_EXAMPLE "Build AsyncLogger example" ON)
+option(ASYNC_LOGGER_BUILD_TESTS "Build AsyncLogger tests" ON)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -21,9 +24,12 @@ else()
     target_compile_options(async_logger PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 endif()
 
+if(ASYNC_LOGGER_BUILD_EXAMPLE)
 add_executable(async_logger_example examples/basic_example.cpp)
 target_link_libraries(async_logger_example PRIVATE async_logger)
+endif()
 
+if(ASYNC_LOGGER_BUILD_TESTS)
 add_executable(async_logger_test tests/async_logger_test.cpp)
 target_link_libraries(async_logger_test PRIVATE async_logger)
 
@@ -34,3 +40,4 @@ target_compile_definitions(async_logger_compile_filter_test PRIVATE ASYNC_LOG_CO
 enable_testing()
 add_test(NAME async_logger_test COMMAND async_logger_test)
 add_test(NAME async_logger_compile_filter_test COMMAND async_logger_compile_filter_test)
+endif()

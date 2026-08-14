@@ -1,0 +1,26 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(MiniRPC LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(MINIREACTOR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MINIREACTOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASYNC_LOGGER_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
+set(ASYNC_LOGGER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(../MiniReactor wheels/minireactor)
+
+add_library(minirpc
+    src/codec.cpp
+)
+target_include_directories(minirpc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(minirpc PUBLIC minireactor)
+target_compile_options(minirpc PRIVATE -Wall -Wextra -Wpedantic)
+
+enable_testing()
+
+add_executable(codec_test tests/codec_test.cpp)
+target_link_libraries(codec_test PRIVATE minirpc)
+add_test(NAME codec_test COMMAND codec_test)
