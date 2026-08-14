@@ -14,6 +14,7 @@ add_subdirectory(../MiniReactor wheels/minireactor)
 
 add_library(minirpc
     src/codec.cpp
+    src/rpc_server.cpp
     src/service_registry.cpp
 )
 target_include_directories(minirpc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -29,3 +30,7 @@ add_test(NAME codec_test COMMAND codec_test)
 add_executable(registry_test tests/registry_test.cpp)
 target_link_libraries(registry_test PRIVATE minirpc)
 add_test(NAME registry_test COMMAND registry_test)
+
+add_executable(rpc_server_test tests/rpc_server_test.cpp)
+target_link_libraries(rpc_server_test PRIVATE minirpc)
+add_test(NAME rpc_server_test COMMAND rpc_server_test)
