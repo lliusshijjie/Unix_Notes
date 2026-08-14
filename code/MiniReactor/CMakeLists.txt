@@ -30,6 +30,7 @@ add_library(minireactor
     src/net/EventLoopThreadPool.cpp
     src/net/InetAddress.cpp
     src/net/Socket.cpp
+    src/net/TcpClient.cpp
     src/net/TcpConnection.cpp
     src/net/TcpServer.cpp
     ${WHEELS_DIR}/ThreadPool/ThreadPool.cpp
@@ -87,3 +88,7 @@ add_test(NAME inet_address_test COMMAND inet_address_test)
 add_executable(connector_test test/ConnectorTest.cpp)
 target_link_libraries(connector_test PRIVATE minireactor)
 add_test(NAME connector_test COMMAND connector_test)
+
+add_executable(tcp_client_test test/TcpClientTest.cpp)
+target_link_libraries(tcp_client_test PRIVATE minireactor)
+add_test(NAME tcp_client_test COMMAND tcp_client_test)

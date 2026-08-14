@@ -6,6 +6,7 @@
 
 #include <cassert>
 #include <cerrno>
+#include <stdexcept>
 #include <sys/socket.h>
 #include <system_error>
 #include <unistd.h>
