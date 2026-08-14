@@ -127,6 +127,12 @@ void RpcClient::disconnect() {
     }
     failAllPending(RpcErrorCode::NetworkError, "RPC connection closed");
     tcpClient_->stop();
+    if (!loop_->isInLoopThread()) {
+        std::promise<void> stopped;
+        std::future<void> stoppedFuture = stopped.get_future();
+        loop_->queueInLoop([&stopped] { stopped.set_value(); });
+        stoppedFuture.get();
+    }
 }
 
 bool RpcClient::connected() const {

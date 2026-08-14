@@ -51,6 +51,7 @@ void RpcServer::onMessage(
 void RpcServer::handleRequest(
     const std::shared_ptr<minireactor::TcpConnection>& connection,
     RpcRequest request) {
+    const std::uint64_t requestId = request.request_id;
     const LookupResult lookup =
         registry_.findMethod(request.service_name, request.method_name);
     if (lookup.status == LookupStatus::ServiceNotFound) {
@@ -87,12 +88,22 @@ void RpcServer::handleRequest(
 
             if (std::shared_ptr<minireactor::TcpConnection> activeConnection =
                     weakConnection.lock()) {
-                activeConnection->send(codec_.encodeResponse(response));
+                std::string frame;
+                try {
+                    frame = codec_.encodeResponse(response);
+                } catch (const std::exception& error) {
+                    response.error_code = static_cast<int>(RpcErrorCode::ServerError);
+                    response.error_message =
+                        std::string("failed to encode RPC response: ") + error.what();
+                    response.payload.clear();
+                    frame = codec_.encodeResponse(response);
+                }
+                activeConnection->send(std::move(frame));
             }
         });
 
     if (result != SubmitResult::accepted) {
-        sendError(connection, request.request_id, RpcErrorCode::ServerError,
+        sendError(connection, requestId, RpcErrorCode::ServerError,
                   "server business queue is full");
     }
 }

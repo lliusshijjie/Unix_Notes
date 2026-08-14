@@ -53,6 +53,11 @@ int main() {
             [](const minirpc::RpcRequest&, minirpc::RpcResponse&) {
                 throw std::runtime_error("boom");
             }));
+        assert(server.registerMethod(
+            "CalculatorService", "OversizedResponse",
+            [](const minirpc::RpcRequest&, minirpc::RpcResponse& response) {
+                response.payload.assign(minirpc::kMaxMessageSize + 1, 'x');
+            }));
         server.start();
         serverReady.set_value(&loop);
         loop.loop();
@@ -69,6 +74,8 @@ int main() {
     std::unordered_map<std::uint64_t, minirpc::RpcResponse> responses;
     std::promise<void> connected;
     auto connectedFuture = connected.get_future();
+    std::promise<void> disconnected;
+    auto disconnectedFuture = disconnected.get_future();
 
     std::promise<std::shared_ptr<minireactor::TcpClient>> clientCreated;
     auto clientCreatedFuture = clientCreated.get_future();
@@ -79,6 +86,8 @@ int main() {
             [&](const std::shared_ptr<minireactor::TcpConnection>& connection) {
                 if (connection->state() == minireactor::TcpConnection::State::kConnected) {
                     connected.set_value();
+                } else {
+                    disconnected.set_value();
                 }
             });
         client->setMessageCallback(
@@ -114,11 +123,13 @@ int main() {
     frames += codec.encodeRequest({1002, "UnknownService", "Add", "10 20"});
     frames += codec.encodeRequest({1003, "CalculatorService", "Unknown", "10 20"});
     frames += codec.encodeRequest({1004, "CalculatorService", "Throw", ""});
+    frames += codec.encodeRequest(
+        {1007, "CalculatorService", "OversizedResponse", ""});
     connection->send(std::move(frames));
 
     {
         std::unique_lock<std::mutex> lock(responsesMutex);
-        assert(responsesReady.wait_for(lock, 2s, [&responses] { return responses.size() == 4; }));
+        assert(responsesReady.wait_for(lock, 2s, [&responses] { return responses.size() == 5; }));
     }
     assert(responses.at(1001).error_code == 0);
     assert(responses.at(1001).payload == "30");
@@ -128,6 +139,26 @@ int main() {
            static_cast<int>(minirpc::RpcErrorCode::MethodNotFound));
     assert(responses.at(1004).error_code ==
            static_cast<int>(minirpc::RpcErrorCode::ServerError));
+    assert(responses.at(1007).error_code ==
+           static_cast<int>(minirpc::RpcErrorCode::ServerError));
+
+    const std::string fragmented =
+        codec.encodeRequest({1005, "CalculatorService", "Add", "7 8"});
+    connection->send(fragmented.substr(0, 10));
+    std::this_thread::sleep_for(20ms);
+    connection->send(fragmented.substr(10));
+    {
+        std::unique_lock<std::mutex> lock(responsesMutex);
+        assert(responsesReady.wait_for(lock, 2s, [&responses] { return responses.size() == 6; }));
+    }
+    assert(responses.at(1005).error_code == 0);
+    assert(responses.at(1005).payload == "15");
+
+    std::string invalid =
+        codec.encodeRequest({1006, "CalculatorService", "Add", "1 2"});
+    invalid[0] = 0;
+    connection->send(std::move(invalid));
+    assert(disconnectedFuture.wait_for(2s) == std::future_status::ready);
 
     connection.reset();
     std::promise<void> clientDestroyed;

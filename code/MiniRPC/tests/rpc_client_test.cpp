@@ -40,6 +40,11 @@ int main() {
                     std::chrono::milliseconds(delayMilliseconds));
                 response.payload = value;
             }));
+        assert(server.registerMethod(
+            "TestService", "Echo",
+            [](const minirpc::RpcRequest& request, minirpc::RpcResponse& response) {
+                response.payload = request.payload;
+            }));
         server.start();
         serverReady.set_value(&loop);
         loop.loop();
@@ -58,6 +63,15 @@ int main() {
         assert(first.error_code == 0);
         assert(first.payload == "first");
         assert(first.request_id != 0);
+
+        constexpr std::size_t requestMetadataSize =
+            sizeof(std::uint32_t) + 11 + sizeof(std::uint32_t) + 4;
+        const std::string largePayload(
+            minirpc::kMaxMessageSize - requestMetadataSize, 'z');
+        const minirpc::RpcResponse large = client.call(
+            {0, "TestService", "Echo", largePayload}, 10s);
+        assert(large.error_code == 0);
+        assert(large.payload == largePayload);
 
         std::vector<std::future<minirpc::RpcResponse>> calls;
         for (int index = 0; index < 8; ++index) {
@@ -96,6 +110,13 @@ int main() {
         assert(interrupted.get().error_code ==
                static_cast<int>(minirpc::RpcErrorCode::NetworkError));
         assert(!client.connected());
+
+        assert(client.connect(2s));
+        const minirpc::RpcResponse afterReconnect = client.call(
+            {0, "TestService", "DelayEcho", "0 reconnected"}, 2s);
+        assert(afterReconnect.error_code == 0);
+        assert(afterReconnect.payload == "reconnected");
+        client.disconnect();
     }
 
     serverLoop->quit();
