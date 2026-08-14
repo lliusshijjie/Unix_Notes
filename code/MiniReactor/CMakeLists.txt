@@ -23,6 +23,7 @@ add_library(minireactor
     src/net/Acceptor.cpp
     src/net/Buffer.cpp
     src/net/Channel.cpp
+    src/net/Connector.cpp
     src/net/EpollPoller.cpp
     src/net/EventLoop.cpp
     src/net/EventLoopThread.cpp
@@ -82,3 +83,7 @@ add_test(NAME logger_test COMMAND logger_test)
 add_executable(inet_address_test test/InetAddressTest.cpp)
 target_link_libraries(inet_address_test PRIVATE minireactor)
 add_test(NAME inet_address_test COMMAND inet_address_test)
+
+add_executable(connector_test test/ConnectorTest.cpp)
+target_link_libraries(connector_test PRIVATE minireactor)
+add_test(NAME connector_test COMMAND connector_test)
