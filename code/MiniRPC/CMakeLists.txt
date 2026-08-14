@@ -14,6 +14,7 @@ add_subdirectory(../MiniReactor wheels/minireactor)
 
 add_library(minirpc
     src/codec.cpp
+    src/rpc_client.cpp
     src/rpc_server.cpp
     src/service_registry.cpp
 )
@@ -34,3 +35,7 @@ add_test(NAME registry_test COMMAND registry_test)
 add_executable(rpc_server_test tests/rpc_server_test.cpp)
 target_link_libraries(rpc_server_test PRIVATE minirpc)
 add_test(NAME rpc_server_test COMMAND rpc_server_test)
+
+add_executable(rpc_client_test tests/rpc_client_test.cpp)
+target_link_libraries(rpc_client_test PRIVATE minirpc)
+add_test(NAME rpc_client_test COMMAND rpc_client_test)
