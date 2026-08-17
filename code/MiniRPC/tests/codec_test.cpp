@@ -57,6 +57,46 @@ void testResponseRoundTrip() {
     assert(decoded.payload == response.payload);
 }
 
+void testExtendedMetadataRoundTrip() {
+    minirpc::RpcCodec codec;
+    minirpc::RpcRequest request{88, "ObservedService", "Echo", "payload"};
+    request.timeout_ms = 1500;
+    request.trace_id = "trace-88";
+    request.serializer = "raw";
+    request.attempt = 3;
+
+    minireactor::Buffer requestBuffer;
+    requestBuffer.append(codec.encodeRequest(request));
+    minirpc::RpcRequest decodedRequest;
+    assert(codec.tryDecodeRequest(requestBuffer, decodedRequest) ==
+           minirpc::DecodeStatus::Complete);
+    assert(decodedRequest.request_id == 88);
+    assert(decodedRequest.service_name == "ObservedService");
+    assert(decodedRequest.method_name == "Echo");
+    assert(decodedRequest.payload == "payload");
+    assert(decodedRequest.timeout_ms == 1500);
+    assert(decodedRequest.trace_id == "trace-88");
+    assert(decodedRequest.serializer == "raw");
+    assert(decodedRequest.attempt == 3);
+
+    minirpc::RpcResponse response{88, 0, "", "ok"};
+    response.trace_id = "trace-88";
+    response.server_cost_us = 1234;
+    response.serializer = "raw";
+
+    minireactor::Buffer responseBuffer;
+    responseBuffer.append(codec.encodeResponse(response));
+    minirpc::RpcResponse decodedResponse;
+    assert(codec.tryDecodeResponse(responseBuffer, decodedResponse) ==
+           minirpc::DecodeStatus::Complete);
+    assert(decodedResponse.request_id == 88);
+    assert(decodedResponse.error_code == 0);
+    assert(decodedResponse.payload == "ok");
+    assert(decodedResponse.trace_id == "trace-88");
+    assert(decodedResponse.server_cost_us == 1234);
+    assert(decodedResponse.serializer == "raw");
+}
+
 void testStickyPackets() {
     minirpc::RpcCodec codec;
     minireactor::Buffer buffer;
@@ -130,6 +170,7 @@ void testMessageSizeLimit() {
 int main() {
     testRequestRoundTripAndFragmentation();
     testResponseRoundTrip();
+    testExtendedMetadataRoundTrip();
     testStickyPackets();
     testInvalidFramesAreRejectedWithoutConsumption();
     testMessageSizeLimit();

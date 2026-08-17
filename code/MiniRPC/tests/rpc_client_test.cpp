@@ -64,8 +64,7 @@ int main() {
         assert(first.payload == "first");
         assert(first.request_id != 0);
 
-        constexpr std::size_t requestMetadataSize =
-            sizeof(std::uint32_t) + 11 + sizeof(std::uint32_t) + 4;
+        constexpr std::size_t requestMetadataSize = 256;
         const std::string largePayload(
             minirpc::kMaxMessageSize - requestMetadataSize, 'z');
         const minirpc::RpcResponse large = client.call(

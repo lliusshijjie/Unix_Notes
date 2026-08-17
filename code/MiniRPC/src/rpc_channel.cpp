@@ -37,4 +37,27 @@ bool RpcChannel::callMethod(std::string_view serviceName,
     return true;
 }
 
+RpcFuture RpcChannel::callMethodAsync(std::string_view serviceName,
+                                      std::string_view methodName,
+                                      std::string requestPayload,
+                                      RpcCallOptions options) {
+    RpcRequest request;
+    request.service_name.assign(serviceName.data(), serviceName.size());
+    request.method_name.assign(methodName.data(), methodName.size());
+    request.payload = std::move(requestPayload);
+    return client_->callAsync(std::move(request), std::move(options));
+}
+
+void RpcChannel::callMethodAsync(std::string_view serviceName,
+                                 std::string_view methodName,
+                                 std::string requestPayload,
+                                 RpcCallback callback,
+                                 RpcCallOptions options) {
+    RpcRequest request;
+    request.service_name.assign(serviceName.data(), serviceName.size());
+    request.method_name.assign(methodName.data(), methodName.size());
+    request.payload = std::move(requestPayload);
+    client_->callAsync(std::move(request), std::move(callback), std::move(options));
+}
+
 }  // namespace minirpc

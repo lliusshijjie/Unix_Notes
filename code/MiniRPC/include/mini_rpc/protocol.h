@@ -21,9 +21,15 @@ enum class RpcErrorCode : int {
     NetworkError = 1001,
     ProtocolError = 1002,
     Timeout = 1003,
+    Cancelled = 1004,
+    ClientStopping = 1005,
+    QueueingTimeout = 1006,
+    RetryExhausted = 1007,
     ServiceNotFound = 2001,
     MethodNotFound = 2002,
-    ServerError = 3001
+    ServerError = 3001,
+    SerializationError = 4001,
+    DeserializationError = 4002
 };
 
 struct RpcHeader {
@@ -40,6 +46,10 @@ struct RpcRequest {
     std::string service_name;
     std::string method_name;
     std::string payload;
+    std::uint64_t timeout_ms{0};
+    std::string trace_id;
+    std::string serializer{"raw"};
+    std::uint32_t attempt{0};
 };
 
 struct RpcResponse {
@@ -47,6 +57,9 @@ struct RpcResponse {
     int error_code{0};
     std::string error_message;
     std::string payload;
+    std::string trace_id;
+    std::uint64_t server_cost_us{0};
+    std::string serializer{"raw"};
 };
 
 }  // namespace minirpc

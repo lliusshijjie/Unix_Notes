@@ -31,6 +31,7 @@ add_library(minirpc
     src/rpc_channel.cpp
     src/rpc_client.cpp
     src/rpc_controller.cpp
+    src/rpc_future.cpp
     src/rpc_server.cpp
     src/service_registry.cpp
 )
@@ -52,9 +53,17 @@ add_executable(rpc_server_test tests/rpc_server_test.cpp)
 target_link_libraries(rpc_server_test PRIVATE minirpc)
 add_test(NAME rpc_server_test COMMAND rpc_server_test)
 
+add_executable(rpc_server_phase2_test tests/rpc_server_phase2_test.cpp)
+target_link_libraries(rpc_server_phase2_test PRIVATE minirpc)
+add_test(NAME rpc_server_phase2_test COMMAND rpc_server_phase2_test)
+
 add_executable(rpc_client_test tests/rpc_client_test.cpp)
 target_link_libraries(rpc_client_test PRIVATE minirpc)
 add_test(NAME rpc_client_test COMMAND rpc_client_test)
+
+add_executable(rpc_async_client_test tests/rpc_async_client_test.cpp)
+target_link_libraries(rpc_async_client_test PRIVATE minirpc)
+add_test(NAME rpc_async_client_test COMMAND rpc_async_client_test)
 
 add_executable(rpc_channel_test tests/rpc_channel_test.cpp)
 target_link_libraries(rpc_channel_test PRIVATE minirpc)
@@ -65,3 +74,6 @@ target_link_libraries(calculator_server PRIVATE minirpc)
 
 add_executable(calculator_client examples/calculator_client.cpp)
 target_link_libraries(calculator_client PRIVATE minirpc)
+
+add_executable(async_calculator_client examples/async_calculator_client.cpp)
+target_link_libraries(async_calculator_client PRIVATE minirpc)
