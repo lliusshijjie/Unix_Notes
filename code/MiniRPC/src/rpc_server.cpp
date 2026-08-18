@@ -1,8 +1,13 @@
 #include "mini_rpc/rpc_server.h"
 
 #include "base/Logger.h"
+#include "mini_rpc/rpc_controller.h"
 #include "net/Buffer.h"
 #include "net/EventLoop.h"
+
+#include <google/protobuf/descriptor.h>
+#include <google/protobuf/message.h>
+#include <google/protobuf/service.h>
 
 #include <exception>
 #include <utility>
@@ -24,6 +29,54 @@ bool RpcServer::registerMethod(std::string serviceName, std::string methodName,
                                MethodHandler handler) {
     return registry_.registerMethod(std::move(serviceName), std::move(methodName),
                                     std::move(handler));
+}
+
+bool RpcServer::registerService(google::protobuf::Service* service) {
+    if (service == nullptr) {
+        return false;
+    }
+    const google::protobuf::ServiceDescriptor* descriptor = service->GetDescriptor();
+    if (descriptor == nullptr || descriptor->method_count() <= 0) {
+        return false;
+    }
+
+    bool registered = true;
+    for (int index = 0; index < descriptor->method_count(); ++index) {
+        const google::protobuf::MethodDescriptor* method = descriptor->method(index);
+        registered =
+            registerMethod(
+                descriptor->name(), method->name(),
+                [service, method](const RpcRequest& request, RpcResponse& response) {
+                    std::unique_ptr<google::protobuf::Message> pbRequest(
+                        service->GetRequestPrototype(method).New());
+                    std::unique_ptr<google::protobuf::Message> pbResponse(
+                        service->GetResponsePrototype(method).New());
+                    if (!pbRequest->ParseFromString(request.payload)) {
+                        response.error_code = static_cast<int>(RpcErrorCode::ProtocolError);
+                        response.error_message = "failed to parse protobuf request";
+                        return;
+                    }
+
+                    RpcController controller;
+                    service->CallMethod(method, &controller, pbRequest.get(),
+                                        pbResponse.get(), nullptr);
+                    if (controller.failed()) {
+                        response.error_code =
+                            controller.errorCode() != 0
+                                ? controller.errorCode()
+                                : static_cast<int>(RpcErrorCode::ServerError);
+                        response.error_message = controller.errorText();
+                        return;
+                    }
+                    if (!pbResponse->SerializeToString(&response.payload)) {
+                        response.error_code = static_cast<int>(RpcErrorCode::ServerError);
+                        response.error_message = "failed to serialize protobuf response";
+                        response.payload.clear();
+                    }
+                }) &&
+            registered;
+    }
+    return registered;
 }
 
 void RpcServer::start() {

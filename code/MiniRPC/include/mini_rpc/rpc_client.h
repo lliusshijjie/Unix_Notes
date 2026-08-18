@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -30,21 +31,25 @@ public:
     bool connect(std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
     void disconnect();
     bool connected() const;
+    std::future<RpcResponse> asyncCall(
+        RpcRequest request,
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
     RpcResponse call(RpcRequest request,
                      std::chrono::milliseconds timeout = std::chrono::milliseconds(3000));
 
 private:
     struct PendingCall {
-        std::mutex mutex;
-        std::condition_variable condition;
-        bool completed{false};
-        RpcResponse response;
+        std::promise<RpcResponse> promise;
+        std::atomic<bool> completed{false};
+        std::uint64_t timerId{0};
     };
 
     void onConnection(const std::shared_ptr<minireactor::TcpConnection>& connection);
     void onConnectionError(int error);
     void onMessage(const std::shared_ptr<minireactor::TcpConnection>& connection,
                    minireactor::Buffer* buffer);
+    void onTimeout(std::uint64_t requestId);
+    std::shared_ptr<PendingCall> takePending(std::uint64_t requestId);
     void completeResponse(RpcResponse response);
     void completeCall(const std::shared_ptr<PendingCall>& pending, RpcResponse response);
     void failAllPending(RpcErrorCode errorCode, const std::string& errorMessage);

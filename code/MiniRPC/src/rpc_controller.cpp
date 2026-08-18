@@ -1,5 +1,7 @@
 #include "mini_rpc/rpc_controller.h"
 
+#include "mini_rpc/protocol.h"
+
 #include <stdexcept>
 #include <utility>
 
@@ -10,6 +12,30 @@ void RpcController::reset() {
     errorCode_ = 0;
     errorMessage_.clear();
 }
+
+void RpcController::Reset() {
+    reset();
+}
+
+bool RpcController::Failed() const {
+    return failed();
+}
+
+std::string RpcController::ErrorText() const {
+    return errorText();
+}
+
+void RpcController::StartCancel() {}
+
+void RpcController::SetFailed(const std::string& reason) {
+    setFailed(static_cast<int>(RpcErrorCode::ServerError), reason);
+}
+
+bool RpcController::IsCanceled() const {
+    return false;
+}
+
+void RpcController::NotifyOnCancel(google::protobuf::Closure*) {}
 
 bool RpcController::failed() const noexcept {
     return failed_;

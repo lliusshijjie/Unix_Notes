@@ -1,3 +1,4 @@
+#include "calculator.pb.h"
 #include "mini_rpc/rpc_channel.h"
 #include "mini_rpc/rpc_client.h"
 #include "mini_rpc/rpc_controller.h"
@@ -22,15 +23,19 @@ int main(int argc, char* argv[]) {
         }
 
         minirpc::RpcChannel channel(client);
+        minirpc::proto::CalculatorService_Stub stub(&channel);
         minirpc::RpcController controller;
-        std::string result;
-        if (!channel.callMethod("CalculatorService", "Add", "10 20", result,
-                                controller)) {
+        minirpc::proto::AddRequest request;
+        request.set_lhs(10);
+        request.set_rhs(20);
+        minirpc::proto::AddResponse response;
+        stub.Add(&controller, &request, &response, nullptr);
+        if (controller.failed()) {
             std::cerr << "RPC failed, code=" << controller.errorCode()
                       << ", message=" << controller.errorText() << '\n';
             return 1;
         }
-        std::cout << "10 + 20 = " << result << '\n';
+        std::cout << "10 + 20 = " << response.result() << '\n';
         client->disconnect();
     } catch (const std::exception& error) {
         std::cerr << "calculator client failed: " << error.what() << '\n';

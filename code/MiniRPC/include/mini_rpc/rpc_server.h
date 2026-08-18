@@ -12,6 +12,12 @@
 #include <memory>
 #include <string>
 
+namespace google {
+namespace protobuf {
+class Service;
+}
+}
+
 namespace minireactor {
 class Buffer;
 class EventLoop;
@@ -27,6 +33,7 @@ public:
 
     bool registerMethod(std::string serviceName, std::string methodName,
                         MethodHandler handler);
+    bool registerService(google::protobuf::Service* service);
     void start();
 
 private:

@@ -140,68 +140,67 @@ bool RpcClient::connected() const {
     return connected_;
 }
 
-RpcResponse RpcClient::call(RpcRequest request, std::chrono::milliseconds timeout) {
-    if (loop_->isInLoopThread()) {
-        throw std::logic_error("RpcClient::call cannot block its EventLoop thread");
+std::future<RpcResponse> RpcClient::asyncCall(RpcRequest request,
+                                              std::chrono::milliseconds timeout) {
+    if (timeout <= std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("RPC timeout must be greater than zero");
     }
+    if (request.request_id == 0) {
+        request.request_id = nextRequestId();
+    }
+    const std::uint64_t requestId = request.request_id;
+    auto pending = std::make_shared<PendingCall>();
+    std::future<RpcResponse> future = pending->promise.get_future();
 
-    const std::uint64_t requestId = nextRequestId();
-    request.request_id = requestId;
     if (!connected()) {
-        return errorResponse(requestId, RpcErrorCode::NetworkError,
-                             "RPC client is not connected");
+        completeCall(pending, errorResponse(requestId, RpcErrorCode::NetworkError,
+                                            "RPC client is not connected"));
+        return future;
     }
 
     std::string frame;
     try {
         frame = codec_.encodeRequest(request);
     } catch (const std::exception& error) {
-        return errorResponse(requestId, RpcErrorCode::ProtocolError, error.what());
+        completeCall(pending, errorResponse(requestId, RpcErrorCode::ProtocolError, error.what()));
+        return future;
     }
 
-    auto pending = std::make_shared<PendingCall>();
     {
         std::lock_guard<std::mutex> lock(pendingMutex_);
         if (!acceptingCalls_) {
-            return errorResponse(requestId, RpcErrorCode::NetworkError,
-                                 "RPC connection is closing");
+            completeCall(pending, errorResponse(requestId, RpcErrorCode::NetworkError,
+                                                "RPC connection is closing"));
+            return future;
         }
-        pendingCalls_.emplace(requestId, pending);
+        if (!pendingCalls_.emplace(requestId, pending).second) {
+            completeCall(pending, errorResponse(requestId, RpcErrorCode::ProtocolError,
+                                                "duplicate request id"));
+            return future;
+        }
+        pending->timerId = loop_->runAfter(
+            std::chrono::duration<double>(timeout).count(),
+            [this, requestId] { onTimeout(requestId); });
     }
 
     std::shared_ptr<minireactor::TcpConnection> connection = tcpClient_->connection();
     if (!connection) {
-        std::lock_guard<std::mutex> lock(pendingMutex_);
-        pendingCalls_.erase(requestId);
-        return errorResponse(requestId, RpcErrorCode::NetworkError,
-                             "RPC connection is unavailable");
+        auto abandoned = takePending(requestId);
+        if (abandoned) {
+            completeCall(abandoned, errorResponse(requestId, RpcErrorCode::NetworkError,
+                                                  "RPC connection is unavailable"));
+        }
+        return future;
     }
     connection->send(std::move(frame));
+    return future;
+}
 
-    {
-        std::unique_lock<std::mutex> lock(pending->mutex);
-        if (pending->condition.wait_for(lock, timeout,
-                                        [&pending] { return pending->completed; })) {
-            return pending->response;
-        }
+RpcResponse RpcClient::call(RpcRequest request, std::chrono::milliseconds timeout) {
+    if (loop_->isInLoopThread()) {
+        throw std::logic_error("RpcClient::call cannot block its EventLoop thread");
     }
-
-    bool ownsTimeout = false;
-    {
-        std::lock_guard<std::mutex> lock(pendingMutex_);
-        const auto found = pendingCalls_.find(requestId);
-        if (found != pendingCalls_.end() && found->second == pending) {
-            pendingCalls_.erase(found);
-            ownsTimeout = true;
-        }
-    }
-    if (ownsTimeout) {
-        return errorResponse(requestId, RpcErrorCode::Timeout, "RPC call timed out");
-    }
-
-    std::unique_lock<std::mutex> lock(pending->mutex);
-    pending->condition.wait(lock, [&pending] { return pending->completed; });
-    return pending->response;
+    return asyncCall(std::move(request), timeout).get();
 }
 
 void RpcClient::onConnection(
@@ -283,31 +282,48 @@ void RpcClient::onMessage(
     }
 }
 
-void RpcClient::completeResponse(RpcResponse response) {
+void RpcClient::onTimeout(std::uint64_t requestId) {
+    auto pending = takePending(requestId);
+    if (pending) {
+        completeCall(pending, errorResponse(requestId, RpcErrorCode::Timeout,
+                                            "RPC call timed out"));
+    }
+}
+
+std::shared_ptr<RpcClient::PendingCall> RpcClient::takePending(std::uint64_t requestId) {
     std::shared_ptr<PendingCall> pending;
+    std::uint64_t timerId = 0;
     {
         std::lock_guard<std::mutex> lock(pendingMutex_);
-        const auto found = pendingCalls_.find(response.request_id);
+        const auto found = pendingCalls_.find(requestId);
         if (found == pendingCalls_.end()) {
-            return;
+            return nullptr;
         }
         pending = found->second;
+        timerId = pending->timerId;
+        pending->timerId = 0;
         pendingCalls_.erase(found);
     }
-    completeCall(pending, std::move(response));
+    if (timerId != 0) {
+        loop_->cancel(timerId);
+    }
+    return pending;
+}
+
+void RpcClient::completeResponse(RpcResponse response) {
+    auto pending = takePending(response.request_id);
+    if (pending) {
+        completeCall(pending, std::move(response));
+    }
 }
 
 void RpcClient::completeCall(const std::shared_ptr<PendingCall>& pending,
                              RpcResponse response) {
-    {
-        std::lock_guard<std::mutex> lock(pending->mutex);
-        if (pending->completed) {
-            return;
-        }
-        pending->response = std::move(response);
-        pending->completed = true;
+    bool expected = false;
+    if (!pending->completed.compare_exchange_strong(expected, true)) {
+        return;
     }
-    pending->condition.notify_one();
+    pending->promise.set_value(std::move(response));
 }
 
 void RpcClient::failAllPending(RpcErrorCode errorCode,
@@ -322,6 +338,10 @@ void RpcClient::failAllPending(RpcErrorCode errorCode,
         pendingCalls_.clear();
     }
     for (auto& item : pending) {
+        if (item.second->timerId != 0) {
+            loop_->cancel(item.second->timerId);
+            item.second->timerId = 0;
+        }
         completeCall(item.second, errorResponse(item.first, errorCode, errorMessage));
     }
 }
