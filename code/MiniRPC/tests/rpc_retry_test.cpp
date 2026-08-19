@@ -20,7 +20,6 @@ namespace {
 constexpr std::uint16_t kPortA = 39196;
 constexpr std::uint16_t kPortB = 39197;
 
-// 实例 A：Echo 慢（3s，用于触发超时）、Slow 慢（3s）
 void registerServerA(minirpc::RpcServer& server) {
     assert(server.registerMethod(
         "TestService", "Echo",
@@ -34,7 +33,6 @@ void registerServerA(minirpc::RpcServer& server) {
         }));
 }
 
-// 实例 B：Echo 立即返回（带实例标识）、Slow 慢（3s）
 void registerServerB(minirpc::RpcServer& server) {
     assert(server.registerMethod(
         "TestService", "Echo",
@@ -50,7 +48,6 @@ void registerServerB(minirpc::RpcServer& server) {
 
 }  // namespace
 
-// 验证自动重试：可重试错误（Timeout）换实例重试、预算约束、关闭重试。
 int main() {
     using namespace std::chrono_literals;
 
@@ -77,8 +74,6 @@ int main() {
     discovery->registerEndpoint("TestService", {"127.0.0.1", kPortB});
 
     {
-        // 用例 1：Timeout 重试换实例成功。
-        // 预算 2s 均分给 2 次尝试 → 第一次打 A（慢）1s 超时，重试打 B（快）成功。
         minirpc::RpcClient client("TestService", discovery);
         client.setMaxRetries(1);
         assert(client.connect(2s));
@@ -88,15 +83,14 @@ int main() {
             client.call({0, "TestService", "Echo", "value"}, 2s);
         const auto elapsed = std::chrono::steady_clock::now() - started;
         assert(response.error_code == 0);
-        assert(response.payload == "value@B");   // 重试确实换到了 B
-        assert(elapsed >= 700ms);                // 第一次确实验证了超时
+        assert(response.payload == "value@B");
+        assert(elapsed >= 700ms);
         assert(elapsed < 1900ms);
 
         client.disconnect();
     }
 
     {
-        // 用例 2：预算约束——A、B 都慢时，总耗时 ≈ timeout，不翻倍。
         minirpc::RpcClient client("TestService", discovery);
         client.setMaxRetries(1);
         assert(client.connect(2s));
@@ -107,13 +101,12 @@ int main() {
         const auto elapsed = std::chrono::steady_clock::now() - started;
         assert(response.error_code == static_cast<int>(minirpc::RpcErrorCode::Timeout));
         assert(elapsed >= 800ms);
-        assert(elapsed < 1500ms);   // 预算控制下总耗时约 1s；失控会到 2s+
+        assert(elapsed < 1500ms);
 
         client.disconnect();
     }
 
     {
-        // 用例 3：setMaxRetries(0) 关闭重试，行为与 Phase2 一致（单次尝试）。
         minirpc::RpcClient client("TestService", discovery);
         client.setMaxRetries(0);
         assert(client.connect(2s));

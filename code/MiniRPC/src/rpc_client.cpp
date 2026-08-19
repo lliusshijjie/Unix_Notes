@@ -224,7 +224,7 @@ bool RpcClient::connect(std::chrono::milliseconds timeout) {
         toConnect.reserve(sessions_.size());
         for (auto& item : sessions_) {
             if (!item.second->connected && !item.second->connecting && item.second->tcpClient) {
-                cancelReconnect(item.second);   // 手动 connect 优先于自动重连
+                cancelReconnect(item.second);
                 item.second->connecting = true;
                 toConnect.push_back(item.second);
             }
@@ -277,7 +277,7 @@ void RpcClient::disconnect() {
         acceptingConnection_ = false;
         connectingCount_ = 0;
         connected_ = false;
-        reconnectEnabled_ = false;   // 主动断开后不再自动重连
+        reconnectEnabled_ = false;
     }
     stateCondition_.notify_all();
     {
@@ -296,8 +296,6 @@ void RpcClient::disconnect() {
             allSessions.push_back(item.second);
         }
     }
-    // stopSession 移到锁外：连锁触发 connectDestroyed → onConnection → scheduleReconnect，
-    // 后者需要再次获取 sessionsMutex_（非递归锁，持锁调用会死锁）。
     for (const auto& session : allSessions) {
         stopSession(session);
     }
@@ -372,16 +370,13 @@ RpcResponse RpcClient::call(RpcRequest request, std::chrono::milliseconds timeou
         return asyncCall(std::move(request), timeout).get();
     }
 
-    // 自动重试：剩余预算均分给剩余尝试次数。
-    // 总耗时不超过调用方 timeout；第一次尝试超时 = timeout / (maxRetries+1)，
-    // 因此 Timeout / NetworkError 失败后还能在预算内换实例重试。
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     RpcResponse lastResponse;
     for (std::size_t attempt = 0; attempt <= maxRetries_; ++attempt) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now());
         if (remaining <= std::chrono::milliseconds::zero()) {
-            return lastResponse;   // 预算耗尽：返回最后一次可重试的错误
+            return lastResponse;
         }
         const auto attemptsLeft = static_cast<std::int64_t>(maxRetries_ - attempt + 1);
         const auto attemptTimeout =
@@ -427,8 +422,6 @@ void RpcClient::scheduleReconnect(const std::shared_ptr<Session>& session) {
     bool enabled = false;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        // acceptingConnection_：仅 connect() 打开的接受窗口内才自动重连，
-        // 防止 connect 超时 / disconnect 后迟到的连接回调触发无意义的循环重连。
         enabled = !stopping_ && acceptingConnection_ && reconnectEnabled_;
     }
     if (!enabled) {
@@ -439,9 +432,6 @@ void RpcClient::scheduleReconnect(const std::shared_ptr<Session>& session) {
         return;
     }
     session->reconnectScheduled = true;
-    // 用 weak_ptr 捕获：定时任务可能在 TimerScheduler 工作线程被销毁，
-    // 若捕获 shared_ptr 会让 Session（持有 TcpClient，要求 loop 线程析构）
-    // 在非 loop 线程析构。Session 生命周期由 sessions_（loop 线程）掌控。
     std::weak_ptr<Session> weakSession = session;
     session->reconnectTimerId = loop_->runAfter(
         reconnectDelay(reconnectBaseDelay_, reconnectMaxDelay_, session->reconnectAttempts),
@@ -462,7 +452,7 @@ void RpcClient::cancelReconnect(const std::shared_ptr<Session>& session) {
 void RpcClient::tryReconnect(const std::weak_ptr<Session>& weakSession) {
     const std::shared_ptr<Session> session = weakSession.lock();
     if (!session) {
-        return;   // Session 已被释放（client 已销毁），放弃重连
+        return;
     }
     bool enabled = false;
     {
@@ -479,7 +469,6 @@ void RpcClient::tryReconnect(const std::weak_ptr<Session>& weakSession) {
     {
         std::lock_guard<std::mutex> lock(sessionsMutex_);
         if (session->connected || session->connecting || !session->reconnectScheduled) {
-            // 已被连接/手动 connect/取消处理，放弃本次重连
             session->reconnectScheduled = false;
             session->reconnectTimerId = 0;
             return;
@@ -524,7 +513,6 @@ void RpcClient::onConnection(
             session->connecting = false;
             session->connected = isConnected;
             if (isConnected) {
-                // 重连成功：退避计数清零，不再有挂起重连
                 session->reconnectAttempts = 0;
                 session->reconnectScheduled = false;
                 session->reconnectTimerId = 0;
@@ -565,9 +553,6 @@ void RpcClient::onConnection(
         loop_->queueInLoop([this, session] {
             if (session) {
                 {
-                    // 只更新状态；stopSession 必须在锁外执行——
-                    // 它会连锁触发 connectDestroyed → onConnection → scheduleReconnect，
-                    // 后者需要再次获取 sessionsMutex_（非递归锁，持锁调用会死锁）。
                     std::lock_guard<std::mutex> lock(sessionsMutex_);
                     session->connected = false;
                 }
@@ -595,7 +580,6 @@ void RpcClient::onConnectionError(const std::string& key, int error) {
             session = found->second;
             session->connecting = false;
             session->connected = false;
-            // 一次建连/重连尝试失败，退避指数递增（连接成功时清零）
             ++session->reconnectAttempts;
         }
         for (const auto& item : sessions_) {
