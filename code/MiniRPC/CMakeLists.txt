@@ -40,6 +40,8 @@ add_library(minirpc
     src/rpc_client.cpp
     src/rpc_controller.cpp
     src/rpc_server.cpp
+    src/round_robin_load_balancer.cpp
+    src/service_discovery.cpp
     src/service_registry.cpp
 )
 target_include_directories(minirpc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -61,6 +63,18 @@ add_test(NAME codec_test COMMAND codec_test)
 add_executable(registry_test tests/registry_test.cpp)
 target_link_libraries(registry_test PRIVATE minirpc)
 add_test(NAME registry_test COMMAND registry_test)
+
+add_executable(service_discovery_test tests/service_discovery_test.cpp)
+target_link_libraries(service_discovery_test PRIVATE minirpc)
+add_test(NAME service_discovery_test COMMAND service_discovery_test)
+
+add_executable(load_balancer_test tests/load_balancer_test.cpp)
+target_link_libraries(load_balancer_test PRIVATE minirpc)
+add_test(NAME load_balancer_test COMMAND load_balancer_test)
+
+add_executable(rpc_load_balancer_test tests/rpc_load_balancer_test.cpp)
+target_link_libraries(rpc_load_balancer_test PRIVATE minirpc)
+add_test(NAME rpc_load_balancer_test COMMAND rpc_load_balancer_test)
 
 add_executable(rpc_server_test tests/rpc_server_test.cpp)
 target_link_libraries(rpc_server_test PRIVATE minirpc)

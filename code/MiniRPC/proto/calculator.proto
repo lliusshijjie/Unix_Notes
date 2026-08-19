@@ -4,15 +4,18 @@ package minirpc.proto;
 
 option cc_generic_services = true;
 
-service CalculatorService {
-    rpc Add(AddRequest) returns (AddResponse);
-}
-
-message AddRequest {
+message CalcRequest {
     int32 lhs = 1;
     int32 rhs = 2;
 }
 
-message AddResponse {
+message CalcResponse {
     int32 result = 1;
+}
+
+service CalculatorService {
+    rpc Add(CalcRequest) returns (CalcResponse);
+    rpc Sub(CalcRequest) returns (CalcResponse);
+    rpc Mul(CalcRequest) returns (CalcResponse);
+    rpc Div(CalcRequest) returns (CalcResponse);
 }

@@ -11,16 +11,51 @@
 
 namespace {
 
+void complete(::google::protobuf::Closure* done) {
+    if (done != nullptr) {
+        done->Run();
+    }
+}
+
 class CalculatorServiceImpl : public minirpc::proto::CalculatorService {
 public:
     void Add(::google::protobuf::RpcController*,
-             const minirpc::proto::AddRequest* request,
-             minirpc::proto::AddResponse* response,
+             const minirpc::proto::CalcRequest* request,
+             minirpc::proto::CalcResponse* response,
              ::google::protobuf::Closure* done) override {
         response->set_result(request->lhs() + request->rhs());
-        if (done != nullptr) {
-            done->Run();
+        complete(done);
+    }
+
+    void Sub(::google::protobuf::RpcController*,
+             const minirpc::proto::CalcRequest* request,
+             minirpc::proto::CalcResponse* response,
+             ::google::protobuf::Closure* done) override {
+        response->set_result(request->lhs() - request->rhs());
+        complete(done);
+    }
+
+    void Mul(::google::protobuf::RpcController*,
+             const minirpc::proto::CalcRequest* request,
+             minirpc::proto::CalcResponse* response,
+             ::google::protobuf::Closure* done) override {
+        response->set_result(request->lhs() * request->rhs());
+        complete(done);
+    }
+
+    void Div(::google::protobuf::RpcController* controller,
+             const minirpc::proto::CalcRequest* request,
+             minirpc::proto::CalcResponse* response,
+             ::google::protobuf::Closure* done) override {
+        if (request->rhs() == 0) {
+            if (controller != nullptr) {
+                controller->SetFailed("division by zero");
+            }
+            complete(done);
+            return;
         }
+        response->set_result(request->lhs() / request->rhs());
+        complete(done);
     }
 };
 

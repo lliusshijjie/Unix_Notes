@@ -23,6 +23,7 @@ enum class RpcErrorCode : int {
     Timeout = 1003,
     ServiceNotFound = 2001,
     MethodNotFound = 2002,
+    ServiceUnavailable = 2003,
     ServerError = 3001
 };
 

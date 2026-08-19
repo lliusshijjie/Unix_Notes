@@ -1,5 +1,6 @@
 #include "mini_rpc/rpc_client.h"
 
+#include "mini_rpc/round_robin_load_balancer.h"
 #include "net/Buffer.h"
 #include "net/EventLoop.h"
 #include "net/InetAddress.h"
@@ -15,24 +16,51 @@
 namespace minirpc {
 
 RpcClient::RpcClient(std::string serverIp, std::uint16_t serverPort) {
-    minireactor::InetAddress address(std::move(serverIp), serverPort);
     loop_ = loopThread_.startLoop();
+    createSession(Endpoint{std::move(serverIp), serverPort});
+}
+
+RpcClient::RpcClient(std::string serviceName, std::shared_ptr<ServiceDiscovery> discovery)
+    : discovery_(std::move(discovery)),
+      loadBalancer_(std::make_shared<RoundRobinLoadBalancer>()),
+      serviceName_(std::move(serviceName)) {
+    if (serviceName_.empty() || !discovery_) {
+        throw std::invalid_argument("RpcClient requires a service name and ServiceDiscovery");
+    }
+    loop_ = loopThread_.startLoop();
+}
+
+void RpcClient::createSession(const Endpoint& endpoint) {
+    const std::string key = toString(endpoint);
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        if (sessions_.find(key) != sessions_.end()) {
+            return;
+        }
+    }
 
     std::promise<void> created;
     std::future<void> createdFuture = created.get_future();
-    loop_->queueInLoop([this, address = std::move(address), &created] {
+    loop_->queueInLoop([this, endpoint, key, &created] {
         try {
-            tcpClient_ =
-                std::make_unique<minireactor::TcpClient>(loop_, address, "mini-rpc-client");
-            tcpClient_->setConnectionCallback(
-                [this](const std::shared_ptr<minireactor::TcpConnection>& connection) {
-                    onConnection(connection);
+            auto session = std::make_shared<Session>();
+            session->endpoint = endpoint;
+            session->tcpClient = std::make_unique<minireactor::TcpClient>(
+                loop_, minireactor::InetAddress(endpoint.host, endpoint.port),
+                "mini-rpc-client-" + key);
+            session->tcpClient->setConnectionCallback(
+                [this, key](const std::shared_ptr<minireactor::TcpConnection>& connection) {
+                    onConnection(key, connection);
                 });
-            tcpClient_->setConnectionErrorCallback(
-                [this](int error) { onConnectionError(error); });
-            tcpClient_->setMessageCallback(
+            session->tcpClient->setConnectionErrorCallback(
+                [this, key](int error) { onConnectionError(key, error); });
+            session->tcpClient->setMessageCallback(
                 [this](const std::shared_ptr<minireactor::TcpConnection>& connection,
                        minireactor::Buffer* buffer) { onMessage(connection, buffer); });
+            {
+                std::lock_guard<std::mutex> lock(sessionsMutex_);
+                sessions_.emplace(key, std::move(session));
+            }
             created.set_value();
         } catch (...) {
             created.set_exception(std::current_exception());
@@ -41,12 +69,102 @@ RpcClient::RpcClient(std::string serverIp, std::uint16_t serverPort) {
     createdFuture.get();
 }
 
+std::shared_ptr<RpcClient::Session> RpcClient::findSession(const Endpoint& endpoint) const {
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
+    const auto found = sessions_.find(toString(endpoint));
+    if (found == sessions_.end()) {
+        return nullptr;
+    }
+    return found->second;
+}
+
+bool RpcClient::hasConnectedSession() const {
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
+    for (const auto& item : sessions_) {
+        if (item.second->connected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<Endpoint> RpcClient::readyEndpoints(const std::vector<Endpoint>& endpoints) const {
+    std::vector<Endpoint> ready;
+    ready.reserve(endpoints.size());
+    std::lock_guard<std::mutex> lock(sessionsMutex_);
+    for (const Endpoint& endpoint : endpoints) {
+        const auto found = sessions_.find(toString(endpoint));
+        if (found != sessions_.end() && found->second->connected) {
+            ready.push_back(endpoint);
+        }
+    }
+    return ready;
+}
+
+std::shared_ptr<minireactor::TcpConnection> RpcClient::selectConnection(
+    const RpcRequest& request, RpcErrorCode& errorCode, std::string& errorMessage) {
+    if (discovery_) {
+        const std::string& serviceName =
+            request.service_name.empty() ? serviceName_ : request.service_name;
+        const std::vector<Endpoint> endpoints = discovery_->discover(serviceName);
+        if (endpoints.empty()) {
+            errorCode = RpcErrorCode::ServiceUnavailable;
+            errorMessage = "no available endpoint";
+            return nullptr;
+        }
+        const std::vector<Endpoint> ready = readyEndpoints(endpoints);
+        if (ready.empty()) {
+            errorCode = RpcErrorCode::ServiceUnavailable;
+            errorMessage = "no available endpoint";
+            return nullptr;
+        }
+        const Endpoint selected = loadBalancer_->select(ready);
+        const std::shared_ptr<Session> session = findSession(selected);
+        if (!session || !session->tcpClient) {
+            errorCode = RpcErrorCode::NetworkError;
+            errorMessage = "RPC connection is unavailable";
+            return nullptr;
+        }
+        std::shared_ptr<minireactor::TcpConnection> connection =
+            session->tcpClient->connection();
+        if (!connection) {
+            errorCode = RpcErrorCode::NetworkError;
+            errorMessage = "RPC connection is unavailable";
+            return nullptr;
+        }
+        return connection;
+    }
+
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        if (sessions_.empty()) {
+            errorCode = RpcErrorCode::NetworkError;
+            errorMessage = "RPC client is not connected";
+            return nullptr;
+        }
+        session = sessions_.begin()->second;
+    }
+    if (!session || !session->tcpClient) {
+        errorCode = RpcErrorCode::NetworkError;
+        errorMessage = "RPC connection is unavailable";
+        return nullptr;
+    }
+    std::shared_ptr<minireactor::TcpConnection> connection = session->tcpClient->connection();
+    if (!connection) {
+        errorCode = RpcErrorCode::NetworkError;
+        errorMessage = "RPC connection is unavailable";
+        return nullptr;
+    }
+    return connection;
+}
+
 RpcClient::~RpcClient() {
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         stopping_ = true;
         acceptingConnection_ = false;
-        connecting_ = false;
+        connectingCount_ = 0;
         connected_ = false;
     }
     stateCondition_.notify_all();
@@ -60,10 +178,11 @@ RpcClient::~RpcClient() {
     std::future<void> destroyedFuture = destroyed.get_future();
     loop_->queueInLoop([this, &destroyed] {
         try {
-            if (tcpClient_) {
-                tcpClient_->stop();
-                tcpClient_.reset();
+            std::lock_guard<std::mutex> lock(sessionsMutex_);
+            for (auto& item : sessions_) {
+                stopSession(item.second);
             }
+            sessions_.clear();
             destroyed.set_value();
         } catch (...) {
             destroyed.set_exception(std::current_exception());
@@ -78,37 +197,64 @@ bool RpcClient::connect(std::chrono::milliseconds timeout) {
         throw std::logic_error("RpcClient::connect cannot block its EventLoop thread");
     }
 
+    if (discovery_) {
+        const std::vector<Endpoint> endpoints = discovery_->discover(serviceName_);
+        if (endpoints.empty()) {
+            return false;
+        }
+        for (const Endpoint& endpoint : endpoints) {
+            createSession(endpoint);
+        }
+    }
+
+    std::vector<std::shared_ptr<Session>> toConnect;
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        toConnect.reserve(sessions_.size());
+        for (auto& item : sessions_) {
+            if (!item.second->connected && !item.second->connecting && item.second->tcpClient) {
+                item.second->connecting = true;
+                toConnect.push_back(item.second);
+            }
+        }
+    }
+
     bool startConnection = false;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         if (stopping_) {
             return false;
         }
-        if (connected_) {
-            return true;
+        if (toConnect.empty()) {
+            return connected_;
         }
-        if (!connecting_) {
-            connecting_ = true;
-            acceptingConnection_ = true;
-            connectionError_ = 0;
-            startConnection = true;
-        }
+        acceptingConnection_ = true;
+        connectingCount_ += static_cast<int>(toConnect.size());
+        startConnection = true;
     }
     if (startConnection) {
-        tcpClient_->connect();
+        for (const auto& session : toConnect) {
+            session->tcpClient->connect();
+        }
     }
 
     bool timedOut = false;
     std::unique_lock<std::mutex> lock(stateMutex_);
-    if (!stateCondition_.wait_for(lock, timeout, [this] { return !connecting_; })) {
-        connecting_ = false;
+    if (!stateCondition_.wait_for(lock, timeout, [this] { return connectingCount_ == 0; })) {
+        connectingCount_ = 0;
         acceptingConnection_ = false;
         timedOut = true;
     }
     const bool result = connected_;
     lock.unlock();
     if (timedOut) {
-        tcpClient_->stop();
+        std::lock_guard<std::mutex> sessionsLock(sessionsMutex_);
+        for (auto& item : sessions_) {
+            if (item.second->connecting) {
+                item.second->connecting = false;
+                stopSession(item.second);
+            }
+        }
     }
     return result;
 }
@@ -117,7 +263,7 @@ void RpcClient::disconnect() {
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         acceptingConnection_ = false;
-        connecting_ = false;
+        connectingCount_ = 0;
         connected_ = false;
     }
     stateCondition_.notify_all();
@@ -126,7 +272,14 @@ void RpcClient::disconnect() {
         acceptingCalls_ = false;
     }
     failAllPending(RpcErrorCode::NetworkError, "RPC connection closed");
-    tcpClient_->stop();
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        for (auto& item : sessions_) {
+            item.second->connected = false;
+            item.second->connecting = false;
+            stopSession(item.second);
+        }
+    }
     if (!loop_->isInLoopThread()) {
         std::promise<void> stopped;
         std::future<void> stoppedFuture = stopped.get_future();
@@ -152,9 +305,12 @@ std::future<RpcResponse> RpcClient::asyncCall(RpcRequest request,
     auto pending = std::make_shared<PendingCall>();
     std::future<RpcResponse> future = pending->promise.get_future();
 
-    if (!connected()) {
-        completeCall(pending, errorResponse(requestId, RpcErrorCode::NetworkError,
-                                            "RPC client is not connected"));
+    RpcErrorCode errorCode = RpcErrorCode::NetworkError;
+    std::string errorMessage;
+    std::shared_ptr<minireactor::TcpConnection> connection =
+        selectConnection(request, errorCode, errorMessage);
+    if (!connection) {
+        completeCall(pending, errorResponse(requestId, errorCode, std::move(errorMessage)));
         return future;
     }
 
@@ -183,15 +339,6 @@ std::future<RpcResponse> RpcClient::asyncCall(RpcRequest request,
             [this, requestId] { onTimeout(requestId); });
     }
 
-    std::shared_ptr<minireactor::TcpConnection> connection = tcpClient_->connection();
-    if (!connection) {
-        auto abandoned = takePending(requestId);
-        if (abandoned) {
-            completeCall(abandoned, errorResponse(requestId, RpcErrorCode::NetworkError,
-                                                  "RPC connection is unavailable"));
-        }
-        return future;
-    }
     connection->send(std::move(frame));
     return future;
 }
@@ -204,59 +351,99 @@ RpcResponse RpcClient::call(RpcRequest request, std::chrono::milliseconds timeou
 }
 
 void RpcClient::onConnection(
-    const std::shared_ptr<minireactor::TcpConnection>& connection) {
-    if (connection->state() == minireactor::TcpConnection::State::kConnected) {
-        bool rejectConnection = false;
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            rejectConnection = stopping_ || !acceptingConnection_;
-            connecting_ = false;
-            connected_ = !rejectConnection;
+    const std::string& key, const std::shared_ptr<minireactor::TcpConnection>& connection) {
+    const bool isConnected = connection->state() == minireactor::TcpConnection::State::kConnected;
+    bool rejectConnection = false;
+    bool anyConnected = false;
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        const auto found = sessions_.find(key);
+        if (found != sessions_.end()) {
+            session = found->second;
+            session->connecting = false;
+            session->connected = isConnected;
         }
-        if (!rejectConnection) {
-            std::lock_guard<std::mutex> lock(pendingMutex_);
-            acceptingCalls_ = true;
+        for (const auto& item : sessions_) {
+            if (item.second->connected) {
+                anyConnected = true;
+                break;
+            }
         }
-        stateCondition_.notify_all();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        rejectConnection = stopping_ || !acceptingConnection_;
+        if (connectingCount_ > 0) {
+            --connectingCount_;
+        }
+        connected_ = anyConnected && !stopping_;
         if (rejectConnection) {
-            loop_->queueInLoop([this] {
-                if (tcpClient_) {
-                    tcpClient_->stop();
-                }
-            });
+            connected_ = false;
         }
+    }
+    if (!rejectConnection && isConnected) {
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        acceptingCalls_ = true;
+    }
+    if (!anyConnected || rejectConnection) {
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        if (!discovery_ || !anyConnected) {
+            acceptingCalls_ = false;
+        }
+    }
+    stateCondition_.notify_all();
+
+    if (rejectConnection && isConnected) {
+        loop_->queueInLoop([this, session] {
+            if (session) {
+                std::lock_guard<std::mutex> lock(sessionsMutex_);
+                session->connected = false;
+                stopSession(session);
+            }
+        });
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        connecting_ = false;
-        connected_ = false;
-        acceptingConnection_ = false;
+    if (!isConnected && !discovery_) {
+        failAllPending(RpcErrorCode::NetworkError, "RPC connection closed");
     }
-    stateCondition_.notify_all();
-    {
-        std::lock_guard<std::mutex> lock(pendingMutex_);
-        acceptingCalls_ = false;
-    }
-    failAllPending(RpcErrorCode::NetworkError, "RPC connection closed");
 }
 
-void RpcClient::onConnectionError(int error) {
+void RpcClient::onConnectionError(const std::string& key, int error) {
+    bool anyConnected = false;
+    {
+        std::lock_guard<std::mutex> lock(sessionsMutex_);
+        const auto found = sessions_.find(key);
+        if (found != sessions_.end()) {
+            found->second->connecting = false;
+            found->second->connected = false;
+        }
+        for (const auto& item : sessions_) {
+            if (item.second->connected) {
+                anyConnected = true;
+                break;
+            }
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
-        connecting_ = false;
-        connected_ = false;
-        acceptingConnection_ = false;
-        connectionError_ = error;
+        if (connectingCount_ > 0) {
+            --connectingCount_;
+        }
+        connected_ = anyConnected && !stopping_;
+        acceptingConnection_ = anyConnected;
     }
     stateCondition_.notify_all();
-    {
-        std::lock_guard<std::mutex> lock(pendingMutex_);
-        acceptingCalls_ = false;
+    if (!discovery_ || !anyConnected) {
+        {
+            std::lock_guard<std::mutex> lock(pendingMutex_);
+            acceptingCalls_ = false;
+        }
+        failAllPending(RpcErrorCode::NetworkError,
+                       std::error_code(error, std::generic_category()).message());
     }
-    failAllPending(RpcErrorCode::NetworkError,
-                   std::error_code(error, std::generic_category()).message());
 }
 
 void RpcClient::onMessage(
@@ -275,7 +462,10 @@ void RpcClient::onMessage(
             }
             failAllPending(RpcErrorCode::ProtocolError,
                            "server returned an invalid RPC response");
-            tcpClient_->stop();
+            std::lock_guard<std::mutex> lock(sessionsMutex_);
+            for (auto& item : sessions_) {
+                stopSession(item.second);
+            }
             return;
         }
         completeResponse(std::move(response));
@@ -326,8 +516,7 @@ void RpcClient::completeCall(const std::shared_ptr<PendingCall>& pending,
     pending->promise.set_value(std::move(response));
 }
 
-void RpcClient::failAllPending(RpcErrorCode errorCode,
-                               const std::string& errorMessage) {
+void RpcClient::failAllPending(RpcErrorCode errorCode, const std::string& errorMessage) {
     std::vector<std::pair<std::uint64_t, std::shared_ptr<PendingCall>>> pending;
     {
         std::lock_guard<std::mutex> lock(pendingMutex_);
@@ -346,6 +535,12 @@ void RpcClient::failAllPending(RpcErrorCode errorCode,
     }
 }
 
+void RpcClient::stopSession(const std::shared_ptr<Session>& session) {
+    if (session && session->tcpClient) {
+        session->tcpClient->stop();
+    }
+}
+
 std::uint64_t RpcClient::nextRequestId() {
     std::uint64_t requestId = nextRequestId_.fetch_add(1, std::memory_order_relaxed);
     if (requestId == 0) {
@@ -354,8 +549,7 @@ std::uint64_t RpcClient::nextRequestId() {
     return requestId;
 }
 
-RpcResponse RpcClient::errorResponse(std::uint64_t requestId,
-                                     RpcErrorCode errorCode,
+RpcResponse RpcClient::errorResponse(std::uint64_t requestId, RpcErrorCode errorCode,
                                      std::string errorMessage) {
     RpcResponse response;
     response.request_id = requestId;
