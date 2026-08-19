@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.16)
 
 project(MiniRPC LANGUAGES CXX)
 
@@ -91,6 +91,14 @@ add_test(NAME rpc_async_client_test COMMAND rpc_async_client_test)
 add_executable(rpc_timeout_test tests/rpc_timeout_test.cpp)
 target_link_libraries(rpc_timeout_test PRIVATE minirpc)
 add_test(NAME rpc_timeout_test COMMAND rpc_timeout_test)
+
+add_executable(rpc_reconnect_test tests/rpc_reconnect_test.cpp)
+target_link_libraries(rpc_reconnect_test PRIVATE minirpc)
+add_test(NAME rpc_reconnect_test COMMAND rpc_reconnect_test)
+
+add_executable(rpc_retry_test tests/rpc_retry_test.cpp)
+target_link_libraries(rpc_retry_test PRIVATE minirpc)
+add_test(NAME rpc_retry_test COMMAND rpc_retry_test)
 
 add_executable(rpc_channel_test tests/rpc_channel_test.cpp)
 target_link_libraries(rpc_channel_test PRIVATE minirpc)
