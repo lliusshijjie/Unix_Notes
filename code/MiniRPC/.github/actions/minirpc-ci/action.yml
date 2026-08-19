@@ -1,0 +1,107 @@
+name: MiniRPC CI
+description: >-
+  Shared CI steps for MiniRPC: locate the MiniRPC source tree, install the
+  toolchain (CMake / GCC / Protobuf), ensure the sibling projects
+  (MiniReactor, AsyncLogger, ThreadPool, TimerScheduler, BlockingQueue) are
+  present, then configure, build and run the MiniRPC test suite. The
+  sanitizer input selects a plain Debug build or an ASan / TSan build
+  (separate build directory each, as required by MiniRPC's CMake).
+
+inputs:
+  sanitizer:
+    description: 'Build variant: default | asan | tsan'
+    required: false
+    default: default
+
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          cmake \
+          g++ \
+          protobuf-compiler \
+          libprotobuf-dev
+
+    # 兼容两种仓库布局：
+    #   1) monorepo（Unix_Notes）：MiniRPC 在 code/MiniRPC，兄弟项目在同级 code/ 下；
+    #   2) MiniRPC 独立仓库：源树即仓库根，兄弟项目从 MINIRPC_DEPS_BASE_URL 克隆到工作区父目录。
+    - name: Locate MiniRPC source root
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f code/MiniRPC/CMakeLists.txt ]; then
+          echo "MINIRPC_DIR=code/MiniRPC" >> "$GITHUB_ENV"
+        elif [ -f CMakeLists.txt ]; then
+          echo "MINIRPC_DIR=." >> "$GITHUB_ENV"
+        else
+          echo "::error::cannot locate MiniRPC CMakeLists.txt"
+          exit 1
+        fi
+        echo "MiniRPC source root: $MINIRPC_DIR"
+
+    - name: Ensure sibling dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="$MINIRPC_DIR"
+        base="$(cd "$dir/.." && pwd)"
+        echo "sibling base: $base"
+        base_url="${MINIRPC_DEPS_BASE_URL:-https://github.com/${GITHUB_REPOSITORY_OWNER}}"
+        deps=(MiniReactor AsyncLogger ThreadPool TimerScheduler BlockingQueue)
+        for dep in "${deps[@]}"; do
+          if [ ! -d "$base/$dep" ]; then
+            echo "cloning missing dependency $dep from $base_url/$dep.git ..."
+            git clone --depth 1 "$base_url/$dep.git" "$base/$dep" \
+              || echo "::warning::failed to clone $base_url/$dep.git"
+          else
+            echo "found dependency: $base/$dep"
+          fi
+        done
+        missing=0
+        for dep in "${deps[@]}"; do
+          if [ ! -d "$base/$dep" ]; then
+            echo "::error::missing dependency $dep under $base"
+            echo "::error::if MiniRPC is a standalone repository, set the MINIRPC_DEPS_BASE_URL repository variable to the GitHub user/org that hosts these sibling repos"
+            missing=1
+          fi
+        done
+        exit "$missing"
+
+    - name: Configure
+      shell: bash
+      working-directory: ${{ env.MINIRPC_DIR }}
+      run: |
+        set -euo pipefail
+        build_dir="build-${{ inputs.sanitizer }}"
+        echo "BUILD_DIR=$build_dir" >> "$GITHUB_ENV"
+        common=(-DCMAKE_BUILD_TYPE=Debug)
+        case "${{ inputs.sanitizer }}" in
+          asan)    common+=(-DMINIRPC_ENABLE_ASAN=ON) ;;
+          tsan)    common+=(-DMINIRPC_ENABLE_TSAN=ON) ;;
+          default) ;;
+          *) echo "::error::unknown sanitizer variant: ${{ inputs.sanitizer }}"; exit 2 ;;
+        esac
+        cmake -S . -B "$build_dir" "${common[@]}"
+
+    - name: Build
+      shell: bash
+      working-directory: ${{ env.MINIRPC_DIR }}
+      run: cmake --build "$BUILD_DIR" -j2
+
+    - name: Test
+      shell: bash
+      working-directory: ${{ env.MINIRPC_DIR }}
+      run: ctest --test-dir "$BUILD_DIR" --output-on-failure
+
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ctest-logs-${{ inputs.sanitizer }}
+        path: ${{ env.MINIRPC_DIR }}/${{ env.BUILD_DIR }}/Testing
+        if-no-files-found: ignore

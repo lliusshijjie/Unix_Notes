@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  minirpc-ci:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: default
+            label: Build & Test
+          - sanitizer: asan
+            label: AddressSanitizer
+          - sanitizer: tsan
+            label: ThreadSanitizer
+    steps:
+      - uses: actions/checkout@v4
+
+      # 共享步骤定义在仓库内的 composite action 中：
+      # 安装依赖 → 定位源树 → 补齐兄弟依赖 → configure / build / test。
+      - uses: ./.github/actions/minirpc-ci
+        with:
+          sanitizer: ${{ matrix.sanitizer }}

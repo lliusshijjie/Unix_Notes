@@ -1,0 +1,51 @@
+name: MiniRPC CI
+
+on:
+  push:
+    paths:
+      - 'code/MiniRPC/**'
+      - 'code/MiniReactor/**'
+      - 'code/AsyncLogger/**'
+      - 'code/ThreadPool/**'
+      - 'code/TimerScheduler/**'
+      - 'code/BlockingQueue/**'
+      - '.github/**'
+  pull_request:
+    paths:
+      - 'code/MiniRPC/**'
+      - 'code/MiniReactor/**'
+      - 'code/AsyncLogger/**'
+      - 'code/ThreadPool/**'
+      - 'code/TimerScheduler/**'
+      - 'code/BlockingQueue/**'
+      - '.github/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  minirpc-ci:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: default
+            label: Build & Test
+          - sanitizer: asan
+            label: AddressSanitizer
+          - sanitizer: tsan
+            label: ThreadSanitizer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./code/MiniRPC/.github/actions/minirpc-ci
+        with:
+          sanitizer: ${{ matrix.sanitizer }}
